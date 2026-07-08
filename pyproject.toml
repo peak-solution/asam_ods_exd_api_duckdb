@@ -1,0 +1,74 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["external_data_file"]
+
+[project]
+name = "asam-ods-exd-api-duckdb"
+version = "1.0.0"
+description = "ASAM ODS EXD API implementation to read external data from DuckDB files."
+readme = "README.md"
+requires-python = ">=3.14"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{name = "peak-solution"}]
+keywords = ["ASAM", "ODS", "EXD-API", "DuckDB", "measurement data"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "duckdb",
+    "ods-exd-api-box>=1.5.0,<2.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "coverage>=7.0",
+    "jupyterlab>=4.0",
+    "mypy>=1.5",
+    "pytest>=9.1.1",
+    "ruff>=0.1.0",
+    "types-grpcio>=1.0.0.20260614",
+    "types-protobuf>=7.34.1.20260518",
+]
+
+[project.urls]
+Homepage = "https://github.com/peak-solution/asam_ods_exd_api_duckdb"
+Repository = "https://github.com/peak-solution/asam_ods_exd_api_duckdb"
+Issues = "https://github.com/peak-solution/asam_ods_exd_api_duckdb/issues"
+
+[project.scripts]
+asam-ods-exd-api-duckdb = "external_data_file:main"
+
+[tool.ruff]
+line-length = 119
+target-version = "py314"
+extend-exclude = ["*.ipynb"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E203"]
+
+[tool.mypy]
+python_version = "3.14"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+no_implicit_optional = true
+exclude = '(^|/)(build|\.venv|\.mypy_cache)(/|$)'
+
+[[tool.mypy.overrides]]
+module = "asammdf.*"
+ignore_missing_imports = true
