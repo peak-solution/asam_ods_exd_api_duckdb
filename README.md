@@ -16,6 +16,43 @@ It is built on the [ods-exd-api-box](https://pypi.org/project/ods-exd-api-box/) 
   Implements the `ExdFileInterface` from `ods-exd-api-box` to access DuckDB files using [duckdb](https://pypi.org/project/duckdb/).
   Also contains the entry point to run the gRPC service.
 
+### Normalized Mode
+
+By default, the plugin reads classic column-wise tables (one channel per column).
+
+An additional normalized mode can be enabled via identifier parameters:
+
+```
+mode=normalized
+```
+
+In normalized mode, all tables are interpreted with this schema:
+
+```sql
+CREATE TABLE mea (
+  name VARCHAR,
+  index BIGINT,
+  value UNION(
+    DT_DOUBLE DOUBLE,
+    DT_FLOAT FLOAT,
+    DT_SHORT SHORT,
+    DT_LONG INT,
+    DT_LONGLONG LONG,
+    DT_STRING VARCHAR
+  ),
+  flag SHORT
+)
+```
+
+Channel mapping rules in normalized mode:
+
+1. Channel `index` is exposed as channel id `0` and marked as independent.
+2. One channel is created per distinct `name` value.
+3. Values are read from `value` and converted by the active UNION member.
+4. Channel ids are deterministic: `index` first, then channel names sorted alphabetically.
+
+The `flag` column is currently parsed as part of the schema but not interpreted functionally.
+
 ### Tests
 * [test_exd_api.py](tests/test_exd_api.py)<br>
   Some basic tests on example files in `data` folder.
