@@ -15,7 +15,9 @@ class ExternalDataFile(ExdFileInterface):
     """Class for handling DuckDB files."""
 
     _INDEPENDENT_COLUMN = "index"
-    _NORMALIZED_COLUMNS = {"name", "index", "value", "flag"}
+    _GROUP_TABLE_PREFIX = "sm"
+    _NORMALIZED_CHANNEL_COLUMN = "channel_id"
+    _NORMALIZED_COLUMNS = {_NORMALIZED_CHANNEL_COLUMN, "index", "value", "flag"}
     _NORMALIZED_MEMBER_TO_ODS = {
         "DT_DOUBLE": ods.DataTypeEnum.DT_DOUBLE,
         "DT_FLOAT": ods.DataTypeEnum.DT_FLOAT,
@@ -35,7 +37,7 @@ class ExternalDataFile(ExdFileInterface):
 
     @dataclass(frozen=True)
     class _NormalizedChannel:
-        name: str
+        channel_id: int
         union_member: str
         ods_type: ods.DataTypeEnum
 
@@ -43,6 +45,7 @@ class ExternalDataFile(ExdFileInterface):
     class _NormalizedTableMeta:
         index_type: ods.DataTypeEnum
         channels: list[ExternalDataFile._NormalizedChannel]
+        channels_by_id: dict[int, ExternalDataFile._NormalizedChannel]
 
     @classmethod
     @override
@@ -58,7 +61,7 @@ class ExternalDataFile(ExdFileInterface):
         self.parameters = parameters
         self._mode_normalized = self._is_normalized_mode(parameters)
         self._normalized_table_meta: dict[str, ExternalDataFile._NormalizedTableMeta] = {}
-        self._normalized_union_members: dict[str, dict[str, set[str]]] = {}
+        self._normalized_union_members: dict[str, dict[int, set[str]]] = {}
         self.con = duckdb.connect(file_path, read_only=True)
         self._log.debug("ExternalDataFile initialized")
 
@@ -96,7 +99,7 @@ class ExternalDataFile(ExdFileInterface):
 
             new_group = exd_api.StructureResult.Group()
             new_group.name = table_name
-            new_group.id = group_index
+            new_group.id = self._group_id_from_table_name(table_name, fallback=group_index)
             new_group.total_number_of_channels = len(columns)
             new_group.number_of_rows = row_count
 
@@ -120,7 +123,7 @@ class ExternalDataFile(ExdFileInterface):
             )
 
     def _fill_structure_normalized(self, structure: exd_api.StructureResult) -> None:
-        """Fill structure for normalized schema with name/index/value/flag rows."""
+        """Fill structure for normalized schema with channel_id/index/value/flag rows."""
         self._log.debug("Building normalized structure for file: %s", self.file_path)
 
         start_time_ods = datetime.now().strftime("%Y%m%d%H%M%S%f")
@@ -139,14 +142,14 @@ class ExternalDataFile(ExdFileInterface):
 
             new_group = exd_api.StructureResult.Group()
             new_group.name = table_name
-            new_group.id = group_index
+            new_group.id = self._group_id_from_table_name(table_name, fallback=group_index)
             new_group.total_number_of_channels = len(table_meta.channels)
             new_group.number_of_rows = row_count
 
             for channel_index, channel_meta in enumerate(table_meta.channels):
                 new_channel = exd_api.StructureResult.Channel()
-                new_channel.name = channel_meta.name
-                new_channel.id = channel_index
+                new_channel.name = str(channel_meta.channel_id)
+                new_channel.id = channel_meta.channel_id
                 new_channel.data_type = channel_meta.ods_type
                 new_channel.unit_string = ""
                 new_group.channels.append(new_channel)
@@ -171,11 +174,7 @@ class ExternalDataFile(ExdFileInterface):
             len(request.channel_ids),
         )
 
-        tables = self._list_tables()
-        if request.group_id < 0 or request.group_id >= len(tables):
-            raise ValueError(f"Invalid group id {request.group_id}!")
-
-        table_name = tables[request.group_id]
+        table_name = self._resolve_table_name_for_group_id(request.group_id)
         columns = self._list_columns(table_name)
         quoted_table = self.__quote_ident(table_name)
 
@@ -253,7 +252,7 @@ class ExternalDataFile(ExdFileInterface):
         return rv
 
     def _get_values_normalized(self, request: exd_api.ValuesRequest) -> exd_api.ValuesResult:
-        """Get values for normalized schema where channel samples are rows keyed by name."""
+        """Get values for normalized schema where samples are rows keyed by channel_id."""
         self._log.debug(
             "GetValues(normalized) request group_id=%d start=%d limit=%d channel_count=%d",
             request.group_id,
@@ -262,11 +261,7 @@ class ExternalDataFile(ExdFileInterface):
             len(request.channel_ids),
         )
 
-        tables = self._list_tables()
-        if request.group_id < 0 or request.group_id >= len(tables):
-            raise ValueError(f"Invalid group id {request.group_id}!")
-
-        table_name = tables[request.group_id]
+        table_name = self._resolve_table_name_for_group_id(request.group_id)
         table_meta = self._get_normalized_table_meta(table_name)
         quoted_table = self.__quote_ident(table_name)
         quoted_index = self.__quote_ident(self._INDEPENDENT_COLUMN)
@@ -279,19 +274,18 @@ class ExternalDataFile(ExdFileInterface):
             raise ValueError(f"Channel start index {request.start} out of range!")
 
         rv = exd_api.ValuesResult(id=request.group_id)
-        max_channel_id = len(table_meta.channels) - 1
 
         for channel_id in request.channel_ids:
-            if channel_id < 0 or channel_id > max_channel_id:
+            channel_meta = table_meta.channels_by_id.get(channel_id)
+            if channel_meta is None:
                 raise ValueError(f"Invalid channel id {channel_id}!")
 
-            channel_meta = table_meta.channels[channel_id]
             ods_type = channel_meta.ods_type
             rows = self.con.execute(
                 f"SELECT {self.__quote_ident('value')} FROM {quoted_table} "
-                f"WHERE {self.__quote_ident('name')} = ? "
+                f"WHERE {self.__quote_ident(self._NORMALIZED_CHANNEL_COLUMN)} = ? "
                 f"ORDER BY {quoted_index} LIMIT ? OFFSET ?",
-                [channel_meta.name, request.limit, request.start],
+                [channel_meta.channel_id, request.limit, request.start],
             ).fetchall()
             section = [self._extract_normalized_value(row[0], channel_meta.union_member) for row in rows]
 
@@ -342,66 +336,71 @@ class ExternalDataFile(ExdFileInterface):
         index_type = self.__duckdb_type_to_ods(index_type_str)
 
         quoted_table = self.__quote_ident(table_name)
-        distinct_names = self.con.execute(
-            f"SELECT DISTINCT {self.__quote_ident('name')} FROM {quoted_table} ORDER BY 1"
+        distinct_channel_ids = self.con.execute(
+            f"SELECT DISTINCT {self.__quote_ident(self._NORMALIZED_CHANNEL_COLUMN)} FROM {quoted_table} ORDER BY 1"
         ).fetchall()
 
         channels: list[ExternalDataFile._NormalizedChannel] = []
-        for row in distinct_names:
-            channel_name = row[0]
-            if channel_name == self._INDEPENDENT_COLUMN:
+        for row in distinct_channel_ids:
+            channel_id_value = row[0]
+            if channel_id_value is None:
                 continue
-            union_member = self._detect_channel_union_member(table_name, channel_name)
+            channel_id = int(channel_id_value)
+            union_member = self._detect_channel_union_member(table_name, channel_id)
             if union_member not in self._NORMALIZED_MEMBER_TO_ODS:
-                raise ValueError(f"Unsupported normalized union member {union_member!r} for channel {channel_name!r}")
+                raise ValueError(f"Unsupported normalized union member {union_member!r} for channel id {channel_id!r}")
 
             channels.append(
                 ExternalDataFile._NormalizedChannel(
-                    name=channel_name,
+                    channel_id=channel_id,
                     union_member=union_member,
                     ods_type=self._NORMALIZED_MEMBER_TO_ODS[union_member],
                 )
             )
 
-        table_meta = ExternalDataFile._NormalizedTableMeta(index_type=index_type, channels=channels)
+        table_meta = ExternalDataFile._NormalizedTableMeta(
+            index_type=index_type,
+            channels=channels,
+            channels_by_id={channel.channel_id: channel for channel in channels},
+        )
         self._normalized_table_meta[table_name] = table_meta
         return table_meta
 
-    def _detect_channel_union_member(self, table_name: str, channel_name: str) -> str:
-        """Resolve the active UNION member for one channel name."""
+    def _detect_channel_union_member(self, table_name: str, channel_id: int) -> str:
+        """Resolve the active UNION member for one channel id."""
         quoted_table = self.__quote_ident(table_name)
-        quoted_name = self.__quote_ident("name")
+        quoted_channel_id = self.__quote_ident(self._NORMALIZED_CHANNEL_COLUMN)
         quoted_value = self.__quote_ident("value")
 
         if table_name not in self._normalized_union_members:
             try:
                 rows = self.con.execute(
-                    f"SELECT {quoted_name}, CAST(union_tag({quoted_value}) AS VARCHAR) "
-                    f"FROM {quoted_table} GROUP BY {quoted_name}, union_tag({quoted_value})"
+                    f"SELECT {quoted_channel_id}, CAST(union_tag({quoted_value}) AS VARCHAR) "
+                    f"FROM {quoted_table} GROUP BY {quoted_channel_id}, union_tag({quoted_value})"
                 ).fetchall()
             except duckdb.Error:
                 rows = []
 
-            members_by_name: dict[str, set[str]] = {}
-            for name_value, member_value in rows:
-                if name_value is None or member_value is None:
+            members_by_id: dict[int, set[str]] = {}
+            for channel_id_value, member_value in rows:
+                if channel_id_value is None or member_value is None:
                     continue
-                channel_members = members_by_name.setdefault(str(name_value), set())
+                channel_members = members_by_id.setdefault(int(channel_id_value), set())
                 channel_members.add(str(member_value).upper())
-            self._normalized_union_members[table_name] = members_by_name
+            self._normalized_union_members[table_name] = members_by_id
 
-        members = sorted(self._normalized_union_members.get(table_name, {}).get(channel_name, set()))
+        members = sorted(self._normalized_union_members.get(table_name, {}).get(channel_id, set()))
         if not members:
             sample = self.con.execute(
                 f"SELECT {quoted_value} FROM {quoted_table} "
-                f"WHERE {quoted_name} = ? AND {quoted_value} IS NOT NULL LIMIT 1",
-                [channel_name],
+                f"WHERE {quoted_channel_id} = ? AND {quoted_value} IS NOT NULL LIMIT 1",
+                [channel_id],
             ).fetchone()
             if sample is None:
-                raise ValueError(f"Could not infer type for normalized channel {channel_name!r}")
+                raise ValueError(f"Could not infer type for normalized channel id {channel_id!r}")
             return self._detect_union_member(sample[0])
         if len(members) > 1:
-            raise ValueError(f"Normalized channel {channel_name!r} uses mixed union members, which is not supported.")
+            raise ValueError(f"Normalized channel id {channel_id!r} uses mixed union members, which is not supported.")
         return members[0]
 
     def _detect_union_member(self, value: object) -> str:
@@ -469,6 +468,30 @@ class ExternalDataFile(ExdFileInterface):
             [table_name],
         ).fetchall()
         return [(row[0], row[1]) for row in rows]
+
+    def _resolve_table_name_for_group_id(self, group_id: int) -> str:
+        """Resolve group_id to table name, preferring `sm<group_id>` naming convention."""
+        tables = self._list_tables()
+        if group_id < 0:
+            raise ValueError(f"Invalid group id {group_id}!")
+
+        table_by_name = f"{self._GROUP_TABLE_PREFIX}{group_id}"
+        if table_by_name in tables:
+            return table_by_name
+
+        # Legacy fallback: treat group_id as ordinal table index.
+        if group_id < len(tables):
+            return tables[group_id]
+
+        raise ValueError(f"Invalid group id {group_id}!")
+
+    def _group_id_from_table_name(self, table_name: str, fallback: int) -> int:
+        """Return parsed group id from `sm<id>` table names, else fallback."""
+        if table_name.startswith(self._GROUP_TABLE_PREFIX):
+            suffix = table_name[len(self._GROUP_TABLE_PREFIX) :]
+            if suffix.isdigit():
+                return int(suffix)
+        return fallback
 
     @staticmethod
     def __quote_ident(name: str) -> str:

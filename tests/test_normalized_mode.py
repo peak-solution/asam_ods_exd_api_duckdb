@@ -55,7 +55,7 @@ class TestNormalizedMode(unittest.TestCase):
         with duckdb.connect(path) as con:
             con.execute(
                 "CREATE TABLE mea ("
-                "name VARCHAR, "
+                "channel_id BIGINT, "
                 '"index" BIGINT, '
                 "value UNION("
                 "DT_DOUBLE DOUBLE, "
@@ -71,25 +71,25 @@ class TestNormalizedMode(unittest.TestCase):
             con.executemany(
                 "INSERT INTO mea VALUES (?, ?, union_value(DT_DOUBLE := ?), ?)",
                 [
-                    ("speed", 0, 1.5, 0),
-                    ("speed", 1, 2.5, 0),
-                    ("speed", 2, 3.5, 0),
+                    (2, 0, 1.5, 0),
+                    (2, 1, 2.5, 0),
+                    (2, 2, 3.5, 0),
                 ],
             )
             con.executemany(
                 "INSERT INTO mea VALUES (?, ?, union_value(DT_LONG := ?), ?)",
                 [
-                    ("rpm", 0, 1000, 0),
-                    ("rpm", 1, 1100, 0),
-                    ("rpm", 2, 1200, 0),
+                    (1, 0, 1000, 0),
+                    (1, 1, 1100, 0),
+                    (1, 2, 1200, 0),
                 ],
             )
             con.executemany(
                 "INSERT INTO mea VALUES (?, ?, union_value(DT_STRING := ?), ?)",
                 [
-                    ("state", 0, "idle", 0),
-                    ("state", 1, "run", 0),
-                    ("state", 2, "run", 0),
+                    (3, 0, "idle", 0),
+                    (3, 1, "run", 0),
+                    (3, 2, "run", 0),
                 ],
             )
         return path
@@ -105,13 +105,14 @@ class TestNormalizedMode(unittest.TestCase):
             self.assertEqual(group.number_of_rows, 3)
             self.assertEqual(group.total_number_of_channels, 3)
 
-            # channel names sorted alphabetically
-            self.assertSequenceEqual([ch.name for ch in group.channels], ["rpm", "speed", "state"])
+            # channels are keyed by numeric channel_id
+            self.assertSequenceEqual([ch.id for ch in group.channels], [1, 2, 3])
+            self.assertSequenceEqual([ch.name for ch in group.channels], ["1", "2", "3"])
             self.assertEqual(group.channels[0].data_type, ods.DataTypeEnum.DT_LONG)
             self.assertEqual(group.channels[1].data_type, ods.DataTypeEnum.DT_DOUBLE)
             self.assertEqual(group.channels[2].data_type, ods.DataTypeEnum.DT_STRING)
 
-            values = self._values(handle, 0, [0, 1, 2], start=0, limit=3)
+            values = self._values(handle, 0, [1, 2, 3], start=0, limit=3)
             self.assertSequenceEqual(list(values.channels[0].values.long_array.values), [1000, 1100, 1200])
             self.assertSequenceEqual(list(values.channels[1].values.double_array.values), [1.5, 2.5, 3.5])
             self.assertSequenceEqual(list(values.channels[2].values.string_array.values), ["idle", "run", "run"])
@@ -122,7 +123,7 @@ class TestNormalizedMode(unittest.TestCase):
         path = self._make_normalized_file("paging_normalized.duckdb")
         handle = self._open(path)
         try:
-            values = self._values(handle, 0, [1], start=1, limit=1)
+            values = self._values(handle, 0, [2], start=1, limit=1)
             self.assertSequenceEqual(list(values.channels[0].values.double_array.values), [2.5])
         finally:
             self.service.Close(handle, None)
@@ -134,17 +135,17 @@ class TestNormalizedMode(unittest.TestCase):
             structure = self._structure(handle)
             group = structure.groups[0]
             self.assertEqual(group.total_number_of_channels, 4)
-            self.assertSequenceEqual([ch.name for ch in group.channels], ["name", "index", "value", "flag"])
+            self.assertSequenceEqual([ch.name for ch in group.channels], ["channel_id", "index", "value", "flag"])
             self.assertEqual(group.channels[2].data_type, ods.DataTypeEnum.DT_UNKNOWN)
         finally:
             self.service.Close(handle, None)
 
-    def test_mixed_union_member_for_same_name_raises(self):
+    def test_mixed_union_member_for_same_channel_id_raises(self):
         path = os.path.join(self.tmp_dir, "mixed_types.duckdb")
         with duckdb.connect(path) as con:
             con.execute(
                 "CREATE TABLE mea ("
-                "name VARCHAR, "
+                "channel_id BIGINT, "
                 '"index" BIGINT, '
                 "value UNION("
                 "DT_DOUBLE DOUBLE, "
@@ -157,8 +158,8 @@ class TestNormalizedMode(unittest.TestCase):
                 "flag SHORT"
                 ")"
             )
-            con.execute("INSERT INTO mea VALUES ('x', 0, union_value(DT_DOUBLE := 1.25), 0)")
-            con.execute("INSERT INTO mea VALUES ('x', 1, union_value(DT_STRING := 'bad'), 0)")
+            con.execute("INSERT INTO mea VALUES (42, 0, union_value(DT_DOUBLE := 1.25), 0)")
+            con.execute("INSERT INTO mea VALUES (42, 1, union_value(DT_STRING := 'bad'), 0)")
 
         handle = self._open(path)
         try:
