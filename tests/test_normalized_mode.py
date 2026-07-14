@@ -26,7 +26,7 @@ class TestNormalizedMode(unittest.TestCase):
     def _uri(path: str) -> str:
         return Path(path).resolve().as_uri()
 
-    def _open(self, path: str, parameters: str = "mode=normalized"):
+    def _open(self, path: str, parameters: str = ""):
         return self.service.Open(exd_api.Identifier(url=self._uri(path), parameters=parameters), None)
 
     def _structure(self, handle) -> exd_api.StructureResult:
@@ -50,7 +50,7 @@ class TestNormalizedMode(unittest.TestCase):
             ),
         )
 
-    def _make_normalized_file(self, name: str) -> str:
+    def _make_file(self, name: str) -> str:
         path = os.path.join(self.tmp_dir, name)
         with duckdb.connect(path) as con:
             con.execute(
@@ -94,8 +94,8 @@ class TestNormalizedMode(unittest.TestCase):
             )
         return path
 
-    def test_normalized_structure_and_values(self):
-        path = self._make_normalized_file("normalized.duckdb")
+    def test_structure_and_values(self):
+        path = self._make_file("normalized.duckdb")
         handle = self._open(path)
         try:
             structure = self._structure(handle)
@@ -119,8 +119,8 @@ class TestNormalizedMode(unittest.TestCase):
         finally:
             self.service.Close(handle, None)
 
-    def test_normalized_paging(self):
-        path = self._make_normalized_file("paging_normalized.duckdb")
+    def test_paging(self):
+        path = self._make_file("paging.duckdb")
         handle = self._open(path)
         try:
             values = self._values(handle, 0, [2], start=1, limit=1)
@@ -128,15 +128,15 @@ class TestNormalizedMode(unittest.TestCase):
         finally:
             self.service.Close(handle, None)
 
-    def test_classic_mode_is_unchanged(self):
-        path = self._make_normalized_file("classic_mode.duckdb")
-        handle = self._open(path, parameters="")
+    def test_default_mode(self):
+        path = self._make_file("default_mode.duckdb")
+        handle = self._open(path)
         try:
             structure = self._structure(handle)
             group = structure.groups[0]
-            self.assertEqual(group.total_number_of_channels, 4)
-            self.assertSequenceEqual([ch.name for ch in group.channels], ["channel_id", "index", "value", "flag"])
-            self.assertEqual(group.channels[2].data_type, ods.DataTypeEnum.DT_UNKNOWN)
+            self.assertEqual(group.total_number_of_channels, 3)
+            self.assertSequenceEqual([ch.id for ch in group.channels], [1, 2, 3])
+            self.assertSequenceEqual([ch.name for ch in group.channels], ["1", "2", "3"])
         finally:
             self.service.Close(handle, None)
 

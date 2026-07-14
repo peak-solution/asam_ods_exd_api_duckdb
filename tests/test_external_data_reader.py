@@ -21,10 +21,37 @@ def _make_empty_duckdb(path: str) -> None:
 
 
 def _make_simple_duckdb(path: str) -> None:
-    """Create a DuckDB file with one table and two columns."""
+    """Create a DuckDB file with one group and two channels."""
     with duckdb.connect(path) as con:
-        con.execute('CREATE TABLE measurements ("index" DOUBLE, value INTEGER)')
-        con.executemany('INSERT INTO measurements VALUES (?, ?)', [(0.0, 1), (1.0, 2)])
+        con.execute(
+            "CREATE TABLE measurements ("
+            "channel_id BIGINT, "
+            '"index" DOUBLE, '
+            "value UNION("
+            "DT_DOUBLE DOUBLE, "
+            "DT_FLOAT FLOAT, "
+            "DT_SHORT SHORT, "
+            "DT_LONG INT, "
+            "DT_LONGLONG LONG, "
+            "DT_STRING VARCHAR, "
+            "DT_BOOLEAN BOOLEAN, "
+            "DT_BYTE UTINYINT, "
+            "DT_COMPLEX STRUCT(re FLOAT, im FLOAT), "
+            "DT_DCOMPLEX STRUCT(re DOUBLE, im DOUBLE), "
+            "DT_BYTESTR BLOB, "
+            "DT_DATE VARCHAR"
+            "), "
+            "flag SHORT"
+            ")"
+        )
+        con.executemany(
+            "INSERT INTO measurements VALUES (?, ?, union_value(DT_DOUBLE := ?), ?)",
+            [(0, 0.0, 0.0, 0), (0, 1.0, 1.0, 0)],
+        )
+        con.executemany(
+            "INSERT INTO measurements VALUES (?, ?, union_value(DT_LONG := ?), ?)",
+            [(1, 0.0, 1, 0), (1, 1.0, 2, 0)],
+        )
 
 
 class TestExternalDataReader(unittest.TestCase):
@@ -53,35 +80,37 @@ class TestExternalDataReader(unittest.TestCase):
         self.assertEqual(self.mock_context.code(), grpc.StatusCode.NOT_FOUND)
 
     def test_simple_example(self):
-        main_file_path = Path.joinpath(Path(__file__).parent.resolve(), "..", "data", "simple.duckdb")
-        main_file_url = Path(main_file_path).absolute().resolve().as_uri()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            file_path = os.path.join(temp_dir, "simple.duckdb")
+            _make_simple_duckdb(file_path)
+            main_file_url = Path(file_path).absolute().resolve().as_uri()
 
-        main_external_data_reader = ExternalDataReader()
-        main_exd_api_handle = main_external_data_reader.Open(
-            exd_api.Identifier(url=main_file_url, parameters=""), None
-        )
-        try:
-            main_exd_api_structure = main_external_data_reader.GetStructure(
-                exd_api.StructureRequest(handle=main_exd_api_handle), None
+            main_external_data_reader = ExternalDataReader()
+            main_exd_api_handle = main_external_data_reader.Open(
+                exd_api.Identifier(url=main_file_url, parameters=""), None
             )
-            print(MessageToJson(main_exd_api_structure))
+            try:
+                main_exd_api_structure = main_external_data_reader.GetStructure(
+                    exd_api.StructureRequest(handle=main_exd_api_handle), None
+                )
+                print(MessageToJson(main_exd_api_structure))
 
-            print(
-                MessageToJson(
-                    main_external_data_reader.GetValues(
-                        exd_api.ValuesRequest(
-                            handle=main_exd_api_handle,
-                            group_id=0,
-                            channel_ids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
-                            start=0,
-                            limit=10,
-                        ),
-                        None,
+                print(
+                    MessageToJson(
+                        main_external_data_reader.GetValues(
+                            exd_api.ValuesRequest(
+                                handle=main_exd_api_handle,
+                                group_id=0,
+                                channel_ids=[0, 1],
+                                start=0,
+                                limit=10,
+                            ),
+                            None,
+                        )
                     )
                 )
-            )
-        finally:
-            main_external_data_reader.Close(main_exd_api_handle, None)
+            finally:
+                main_external_data_reader.Close(main_exd_api_handle, None)
 
     def test_close_duckdb(self):
         with tempfile.TemporaryDirectory() as temp_dir:

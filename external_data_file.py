@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from typing import override
+from typing import Any, Mapping, cast, override
 
 import duckdb
 from ods_exd_api_box import ExdFileInterface, exd_api, ods
@@ -16,36 +16,48 @@ class ExternalDataFile(ExdFileInterface):
 
     _INDEPENDENT_COLUMN = "index"
     _GROUP_TABLE_PREFIX = "sm"
-    _NORMALIZED_CHANNEL_COLUMN = "channel_id"
-    _NORMALIZED_COLUMNS = {_NORMALIZED_CHANNEL_COLUMN, "index", "value", "flag"}
-    _NORMALIZED_MEMBER_TO_ODS = {
+    _CHANNEL_COLUMN = "channel_id"
+    _REQUIRED_COLUMNS = {_CHANNEL_COLUMN, "index", "value", "flag"}
+    _MEMBER_TO_ODS = {
         "DT_DOUBLE": ods.DataTypeEnum.DT_DOUBLE,
         "DT_FLOAT": ods.DataTypeEnum.DT_FLOAT,
         "DT_SHORT": ods.DataTypeEnum.DT_SHORT,
         "DT_LONG": ods.DataTypeEnum.DT_LONG,
         "DT_LONGLONG": ods.DataTypeEnum.DT_LONGLONG,
         "DT_STRING": ods.DataTypeEnum.DT_STRING,
+        "DT_BOOLEAN": ods.DataTypeEnum.DT_BOOLEAN,
+        "DT_BYTE": ods.DataTypeEnum.DT_BYTE,
+        "DT_COMPLEX": ods.DataTypeEnum.DT_COMPLEX,
+        "DT_DCOMPLEX": ods.DataTypeEnum.DT_DCOMPLEX,
+        "DT_BYTESTR": ods.DataTypeEnum.DT_BYTESTR,
+        "DT_DATE": ods.DataTypeEnum.DT_DATE,
     }
-    _NORMALIZED_MEMBER_ORDER = [
+    _MEMBER_ORDER = [
         "DT_DOUBLE",
         "DT_FLOAT",
         "DT_SHORT",
         "DT_LONG",
         "DT_LONGLONG",
         "DT_STRING",
+        "DT_BOOLEAN",
+        "DT_BYTE",
+        "DT_COMPLEX",
+        "DT_DCOMPLEX",
+        "DT_BYTESTR",
+        "DT_DATE",
     ]
 
     @dataclass(frozen=True)
-    class _NormalizedChannel:
+    class _ChannelMeta:
         channel_id: int
         union_member: str
         ods_type: ods.DataTypeEnum
 
     @dataclass(frozen=True)
-    class _NormalizedTableMeta:
+    class _TableMeta:
         index_type: ods.DataTypeEnum
-        channels: list[ExternalDataFile._NormalizedChannel]
-        channels_by_id: dict[int, ExternalDataFile._NormalizedChannel]
+        channels: list[ExternalDataFile._ChannelMeta]
+        channels_by_id: dict[int, ExternalDataFile._ChannelMeta]
 
     @classmethod
     @override
@@ -59,9 +71,8 @@ class ExternalDataFile(ExdFileInterface):
         self._log.debug("Initializing ExternalDataFile with path: %s and parameters: %s", file_path, parameters)
         self.file_path = file_path
         self.parameters = parameters
-        self._mode_normalized = self._is_normalized_mode(parameters)
-        self._normalized_table_meta: dict[str, ExternalDataFile._NormalizedTableMeta] = {}
-        self._normalized_union_members: dict[str, dict[int, set[str]]] = {}
+        self._table_meta: dict[str, ExternalDataFile._TableMeta] = {}
+        self._union_members: dict[str, dict[int, set[str]]] = {}
         self.con = duckdb.connect(file_path, read_only=True)
         self._log.debug("ExternalDataFile initialized")
 
@@ -73,72 +84,16 @@ class ExternalDataFile(ExdFileInterface):
 
     @override
     def fill_structure(self, structure: exd_api.StructureResult) -> None:
-        """Fill the structure of the external data file."""
-        if self._mode_normalized:
-            self._fill_structure_normalized(structure)
-            return
-
-        self._fill_structure_classic(structure)
-
-    def _fill_structure_classic(self, structure: exd_api.StructureResult) -> None:
-        """Fill structure by mapping one table column to one channel."""
+        """Fill structure for channel_id/index/value/flag row schema."""
         self._log.debug("Building structure for file: %s", self.file_path)
 
         start_time_ods = datetime.now().strftime("%Y%m%d%H%M%S%f")
         structure.attributes.variables["start_time"].string_array.values.append(start_time_ods)
 
         tables = self._list_tables()
-        self._log.debug("Found %d tables in DuckDB", len(tables))
-
         for group_index, table_name in enumerate(tables):
-            columns = self._list_columns(table_name)
-            row_count_row = self.con.execute(f"SELECT COUNT(*) FROM {self.__quote_ident(table_name)}").fetchone()
-            if row_count_row is None:
-                raise ValueError(f"Could not read row count for table {table_name!r}")
-            row_count = row_count_row[0]
-
-            new_group = exd_api.StructureResult.Group()
-            new_group.name = table_name
-            new_group.id = self._group_id_from_table_name(table_name, fallback=group_index)
-            new_group.total_number_of_channels = len(columns)
-            new_group.number_of_rows = row_count
-
-            for channel_index, (col_name, col_type) in enumerate(columns):
-                new_channel = exd_api.StructureResult.Channel()
-                new_channel.name = col_name
-                new_channel.id = channel_index
-                new_channel.data_type = self.__duckdb_type_to_ods(col_type)
-                new_channel.unit_string = ""
-                if col_name == self._INDEPENDENT_COLUMN:
-                    new_channel.attributes.variables["independent"].long_array.values.append(1)
-                new_group.channels.append(new_channel)
-
-            structure.groups.append(new_group)
-            self._log.debug(
-                "Added group id=%d name=%s channels=%d rows=%d",
-                new_group.id,
-                new_group.name,
-                len(new_group.channels),
-                new_group.number_of_rows,
-            )
-
-    def _fill_structure_normalized(self, structure: exd_api.StructureResult) -> None:
-        """Fill structure for normalized schema with channel_id/index/value/flag rows."""
-        self._log.debug("Building normalized structure for file: %s", self.file_path)
-
-        start_time_ods = datetime.now().strftime("%Y%m%d%H%M%S%f")
-        structure.attributes.variables["start_time"].string_array.values.append(start_time_ods)
-
-        tables = self._list_tables()
-        for group_index, table_name in enumerate(tables):
-            table_meta = self._get_normalized_table_meta(table_name)
-            quoted_table = self.__quote_ident(table_name)
-            row_count_row = self.con.execute(
-                f"SELECT COUNT(DISTINCT {self.__quote_ident(self._INDEPENDENT_COLUMN)}) FROM {quoted_table}"
-            ).fetchone()
-            if row_count_row is None:
-                raise ValueError(f"Could not read row count for table {table_name!r}")
-            row_count = row_count_row[0]
+            table_meta = self._get_table_meta(table_name)
+            row_count, _ = self._get_row_layout(table_name)
 
             new_group = exd_api.StructureResult.Group()
             new_group.name = table_name
@@ -152,20 +107,15 @@ class ExternalDataFile(ExdFileInterface):
                 new_channel.id = channel_meta.channel_id
                 new_channel.data_type = channel_meta.ods_type
                 new_channel.unit_string = ""
+                if channel_meta.channel_id == 0:
+                    new_channel.attributes.variables["independent"].long_array.values.append(1)
                 new_group.channels.append(new_channel)
 
             structure.groups.append(new_group)
 
     @override
     def get_values(self, request: exd_api.ValuesRequest) -> exd_api.ValuesResult:
-        """Get values from the external data file."""
-        if self._mode_normalized:
-            return self._get_values_normalized(request)
-
-        return self._get_values_classic(request)
-
-    def _get_values_classic(self, request: exd_api.ValuesRequest) -> exd_api.ValuesResult:
-        """Get values for classic column-wise tables."""
+        """Get values where samples are rows keyed by channel_id."""
         self._log.debug(
             "GetValues request group_id=%d start=%d limit=%d channel_count=%d",
             request.group_id,
@@ -175,35 +125,63 @@ class ExternalDataFile(ExdFileInterface):
         )
 
         table_name = self._resolve_table_name_for_group_id(request.group_id)
-        columns = self._list_columns(table_name)
+        table_meta = self._get_table_meta(table_name)
         quoted_table = self.__quote_ident(table_name)
+        quoted_index = self.__quote_ident(self._INDEPENDENT_COLUMN)
 
-        nr_of_rows_row = self.con.execute(f"SELECT COUNT(*) FROM {quoted_table}").fetchone()
-        if nr_of_rows_row is None:
-            raise ValueError(f"Could not read row count for table {table_name!r}")
-        nr_of_rows = nr_of_rows_row[0]
+        nr_of_rows, index_aligned = self._get_row_layout(table_name)
         if request.start > nr_of_rows:
             raise ValueError(f"Channel start index {request.start} out of range!")
 
         rv = exd_api.ValuesResult(id=request.group_id)
 
         for channel_id in request.channel_ids:
-            if channel_id < 0 or channel_id >= len(columns):
+            channel_meta = table_meta.channels_by_id.get(channel_id)
+            if channel_meta is None:
                 raise ValueError(f"Invalid channel id {channel_id}!")
 
-            col_name, col_type = columns[channel_id]
-            ods_type = self.__duckdb_type_to_ods(col_type)
-            quoted_col = self.__quote_ident(col_name)
+            ods_type = channel_meta.ods_type
+            flags: list[int] = []
+            if index_aligned:
+                stop = min(nr_of_rows, request.start + request.limit)
+                rows = self.con.execute(
+                    f"SELECT {quoted_index}, {self.__quote_ident('value')}, "
+                    f"{self.__quote_ident('flag')} FROM {quoted_table} "
+                    f"WHERE {self.__quote_ident(self._CHANNEL_COLUMN)} = ? "
+                    f"AND {quoted_index} >= ? AND {quoted_index} < ? "
+                    f"ORDER BY {quoted_index}",
+                    [channel_meta.channel_id, request.start, stop],
+                ).fetchall()
+                rows_by_index: dict[int, tuple[object, int]] = {}
+                for index_value, value_obj, flag_value in rows:
+                    if not self._is_non_negative_integral(index_value):
+                        continue
+                    idx = int(float(index_value))
+                    rows_by_index[idx] = (value_obj, int(flag_value) if flag_value is not None else 0)
 
-            rows = self.con.execute(
-                f"SELECT {quoted_col} FROM {quoted_table} LIMIT ? OFFSET ?",
-                [request.limit, request.start],
-            ).fetchall()
-            section = [row[0] for row in rows]
+                section: list[object] = []
+                for idx in range(request.start, stop):
+                    row = rows_by_index.get(idx)
+                    if row is None:
+                        section.append(self._invalid_placeholder_for_type(ods_type))
+                        flags.append(0)
+                    else:
+                        section.append(self._extract_value(row[0], channel_meta.union_member))
+                        flags.append(row[1])
+            else:
+                rows = self.con.execute(
+                    f"SELECT {self.__quote_ident('value')}, {self.__quote_ident('flag')} FROM {quoted_table} "
+                    f"WHERE {self.__quote_ident(self._CHANNEL_COLUMN)} = ? "
+                    f"ORDER BY {quoted_index} LIMIT ? OFFSET ?",
+                    [channel_meta.channel_id, request.limit, request.start],
+                ).fetchall()
+                section = [self._extract_value(row[0], channel_meta.union_member) for row in rows]
+                flags = [int(row[1]) if row[1] is not None else 0 for row in rows]
 
             new_channel_values = exd_api.ValuesResult.ChannelValues()
             new_channel_values.id = channel_id
             new_channel_values.values.data_type = ods_type
+            new_channel_values.flags.values[:] = flags
 
             if ods_type == ods.DataTypeEnum.DT_BOOLEAN:
                 new_channel_values.values.boolean_array.values.extend(section)
@@ -225,110 +203,50 @@ class ExternalDataFile(ExdFileInterface):
             elif ods_type == ods.DataTypeEnum.DT_COMPLEX:
                 interleaved: list[float] = []
                 for v in section:
-                    interleaved.append(float(v["re"]))
-                    interleaved.append(float(v["im"]))
+                    if not isinstance(v, Mapping):
+                        raise ValueError(f"Expected complex struct mapping, got {v!r}")
+                    struct_v = cast(Mapping[str, Any], v)
+                    interleaved.append(float(struct_v["re"]))
+                    interleaved.append(float(struct_v["im"]))
                 new_channel_values.values.float_array.values[:] = interleaved
             elif ods_type == ods.DataTypeEnum.DT_DCOMPLEX:
                 interleaved_d: list[float] = []
                 for v in section:
-                    interleaved_d.append(float(v["re"]))
-                    interleaved_d.append(float(v["im"]))
+                    if not isinstance(v, Mapping):
+                        raise ValueError(f"Expected dcomplex struct mapping, got {v!r}")
+                    struct_vd = cast(Mapping[str, Any], v)
+                    interleaved_d.append(float(struct_vd["re"]))
+                    interleaved_d.append(float(struct_vd["im"]))
                 new_channel_values.values.double_array.values[:] = interleaved_d
             elif ods_type == ods.DataTypeEnum.DT_STRING:
-                new_channel_values.values.string_array.values[:] = section
+                new_channel_values.values.string_array.values[:] = [str(v) for v in section]
             elif ods_type == ods.DataTypeEnum.DT_BYTESTR:
                 for item in section:
-                    new_channel_values.values.bytestr_array.values.append(
-                        item if isinstance(item, bytes) else bytes(item)
-                    )
+                    if isinstance(item, bytes):
+                        new_channel_values.values.bytestr_array.values.append(item)
+                    elif isinstance(item, bytearray):
+                        new_channel_values.values.bytestr_array.values.append(bytes(cast(bytearray, item)))
+                    else:
+                        raise ValueError(f"Expected bytes value, got {item!r}")
             elif ods_type == ods.DataTypeEnum.DT_DATE:
                 new_channel_values.values.string_array.values[:] = [str(v) for v in section]
             else:
-                raise NotImplementedError(f"Unsupported DuckDB type {col_type!r} for column {col_name!r}")
-
-            rv.channels.append(new_channel_values)
-
-        self._log.debug("GetValues returning %d channels", len(rv.channels))
-        return rv
-
-    def _get_values_normalized(self, request: exd_api.ValuesRequest) -> exd_api.ValuesResult:
-        """Get values for normalized schema where samples are rows keyed by channel_id."""
-        self._log.debug(
-            "GetValues(normalized) request group_id=%d start=%d limit=%d channel_count=%d",
-            request.group_id,
-            request.start,
-            request.limit,
-            len(request.channel_ids),
-        )
-
-        table_name = self._resolve_table_name_for_group_id(request.group_id)
-        table_meta = self._get_normalized_table_meta(table_name)
-        quoted_table = self.__quote_ident(table_name)
-        quoted_index = self.__quote_ident(self._INDEPENDENT_COLUMN)
-
-        nr_of_rows_row = self.con.execute(f"SELECT COUNT(DISTINCT {quoted_index}) FROM {quoted_table}").fetchone()
-        if nr_of_rows_row is None:
-            raise ValueError(f"Could not read row count for table {table_name!r}")
-        nr_of_rows = nr_of_rows_row[0]
-        if request.start > nr_of_rows:
-            raise ValueError(f"Channel start index {request.start} out of range!")
-
-        rv = exd_api.ValuesResult(id=request.group_id)
-
-        for channel_id in request.channel_ids:
-            channel_meta = table_meta.channels_by_id.get(channel_id)
-            if channel_meta is None:
-                raise ValueError(f"Invalid channel id {channel_id}!")
-
-            ods_type = channel_meta.ods_type
-            rows = self.con.execute(
-                f"SELECT {self.__quote_ident('value')} FROM {quoted_table} "
-                f"WHERE {self.__quote_ident(self._NORMALIZED_CHANNEL_COLUMN)} = ? "
-                f"ORDER BY {quoted_index} LIMIT ? OFFSET ?",
-                [channel_meta.channel_id, request.limit, request.start],
-            ).fetchall()
-            section = [self._extract_normalized_value(row[0], channel_meta.union_member) for row in rows]
-
-            new_channel_values = exd_api.ValuesResult.ChannelValues()
-            new_channel_values.id = channel_id
-            new_channel_values.values.data_type = ods_type
-
-            if ods_type == ods.DataTypeEnum.DT_BOOLEAN:
-                new_channel_values.values.boolean_array.values.extend(section)
-            elif ods_type == ods.DataTypeEnum.DT_BYTE:
-                byte_values: list[int] = []
-                for raw_value in section:
-                    if not isinstance(raw_value, int):
-                        raise ValueError(f"Expected integer byte value, got {raw_value!r}")
-                    byte_values.append(raw_value)
-                new_channel_values.values.byte_array.values = bytes(byte_values)
-            elif ods_type in (ods.DataTypeEnum.DT_SHORT, ods.DataTypeEnum.DT_LONG):
-                new_channel_values.values.long_array.values[:] = section
-            elif ods_type == ods.DataTypeEnum.DT_LONGLONG:
-                new_channel_values.values.longlong_array.values[:] = section
-            elif ods_type == ods.DataTypeEnum.DT_FLOAT:
-                new_channel_values.values.float_array.values[:] = section
-            elif ods_type == ods.DataTypeEnum.DT_DOUBLE:
-                new_channel_values.values.double_array.values[:] = section
-            elif ods_type == ods.DataTypeEnum.DT_STRING:
-                new_channel_values.values.string_array.values[:] = section
-            else:
-                raise NotImplementedError(f"Unsupported normalized ODS type {ods_type!r}")
+                raise NotImplementedError(f"Unsupported ODS type {ods_type!r}")
 
             rv.channels.append(new_channel_values)
 
         return rv
 
-    def _get_normalized_table_meta(self, table_name: str) -> _NormalizedTableMeta:
-        """Build and cache normalized channel mapping for one table."""
-        if table_name in self._normalized_table_meta:
-            return self._normalized_table_meta[table_name]
+    def _get_table_meta(self, table_name: str) -> _TableMeta:
+        """Build and cache channel mapping for one table."""
+        if table_name in self._table_meta:
+            return self._table_meta[table_name]
 
         columns = self._list_columns(table_name)
         column_names = {name for name, _ in columns}
-        if column_names != self._NORMALIZED_COLUMNS:
+        if column_names != self._REQUIRED_COLUMNS:
             raise ValueError(
-                f"Normalized mode requires columns {sorted(self._NORMALIZED_COLUMNS)!r}, "
+                f"Required columns are {sorted(self._REQUIRED_COLUMNS)!r}, "
                 f"got {sorted(column_names)!r} for table {table_name!r}."
             )
 
@@ -337,42 +255,42 @@ class ExternalDataFile(ExdFileInterface):
 
         quoted_table = self.__quote_ident(table_name)
         distinct_channel_ids = self.con.execute(
-            f"SELECT DISTINCT {self.__quote_ident(self._NORMALIZED_CHANNEL_COLUMN)} FROM {quoted_table} ORDER BY 1"
+            f"SELECT DISTINCT {self.__quote_ident(self._CHANNEL_COLUMN)} FROM {quoted_table} ORDER BY 1"
         ).fetchall()
 
-        channels: list[ExternalDataFile._NormalizedChannel] = []
+        channels: list[ExternalDataFile._ChannelMeta] = []
         for row in distinct_channel_ids:
             channel_id_value = row[0]
             if channel_id_value is None:
                 continue
             channel_id = int(channel_id_value)
             union_member = self._detect_channel_union_member(table_name, channel_id)
-            if union_member not in self._NORMALIZED_MEMBER_TO_ODS:
-                raise ValueError(f"Unsupported normalized union member {union_member!r} for channel id {channel_id!r}")
+            if union_member not in self._MEMBER_TO_ODS:
+                raise ValueError(f"Unsupported union member {union_member!r} for channel id {channel_id!r}")
 
             channels.append(
-                ExternalDataFile._NormalizedChannel(
+                ExternalDataFile._ChannelMeta(
                     channel_id=channel_id,
                     union_member=union_member,
-                    ods_type=self._NORMALIZED_MEMBER_TO_ODS[union_member],
+                    ods_type=self._MEMBER_TO_ODS[union_member],
                 )
             )
 
-        table_meta = ExternalDataFile._NormalizedTableMeta(
+        table_meta = ExternalDataFile._TableMeta(
             index_type=index_type,
             channels=channels,
             channels_by_id={channel.channel_id: channel for channel in channels},
         )
-        self._normalized_table_meta[table_name] = table_meta
+        self._table_meta[table_name] = table_meta
         return table_meta
 
     def _detect_channel_union_member(self, table_name: str, channel_id: int) -> str:
         """Resolve the active UNION member for one channel id."""
         quoted_table = self.__quote_ident(table_name)
-        quoted_channel_id = self.__quote_ident(self._NORMALIZED_CHANNEL_COLUMN)
+        quoted_channel_id = self.__quote_ident(self._CHANNEL_COLUMN)
         quoted_value = self.__quote_ident("value")
 
-        if table_name not in self._normalized_union_members:
+        if table_name not in self._union_members:
             try:
                 rows = self.con.execute(
                     f"SELECT {quoted_channel_id}, CAST(union_tag({quoted_value}) AS VARCHAR) "
@@ -387,9 +305,9 @@ class ExternalDataFile(ExdFileInterface):
                     continue
                 channel_members = members_by_id.setdefault(int(channel_id_value), set())
                 channel_members.add(str(member_value).upper())
-            self._normalized_union_members[table_name] = members_by_id
+            self._union_members[table_name] = members_by_id
 
-        members = sorted(self._normalized_union_members.get(table_name, {}).get(channel_id, set()))
+        members = sorted(self._union_members.get(table_name, {}).get(channel_id, set()))
         if not members:
             sample = self.con.execute(
                 f"SELECT {quoted_value} FROM {quoted_table} "
@@ -397,10 +315,10 @@ class ExternalDataFile(ExdFileInterface):
                 [channel_id],
             ).fetchone()
             if sample is None:
-                raise ValueError(f"Could not infer type for normalized channel id {channel_id!r}")
+                raise ValueError(f"Could not infer type for channel id {channel_id!r}")
             return self._detect_union_member(sample[0])
         if len(members) > 1:
-            raise ValueError(f"Normalized channel id {channel_id!r} uses mixed union members, which is not supported.")
+            raise ValueError(f"Channel id {channel_id!r} uses mixed union members, which is not supported.")
         return members[0]
 
     def _detect_union_member(self, value: object) -> str:
@@ -414,41 +332,83 @@ class ExternalDataFile(ExdFileInterface):
                 return "DT_LONG"
             raise ValueError(f"Could not infer union member from scalar value {value!r}")
 
-        direct_members = [name for name in self._NORMALIZED_MEMBER_ORDER if name in value and value[name] is not None]
+        direct_members = [name for name in self._MEMBER_ORDER if name in value and value[name] is not None]
         if len(direct_members) == 1:
             return direct_members[0]
 
         tag_value = value.get("__tag")
         if isinstance(tag_value, str):
             return tag_value
-        if isinstance(tag_value, int) and 0 <= tag_value < len(self._NORMALIZED_MEMBER_ORDER):
-            return self._NORMALIZED_MEMBER_ORDER[tag_value]
+        if isinstance(tag_value, int) and 0 <= tag_value < len(self._MEMBER_ORDER):
+            return self._MEMBER_ORDER[tag_value]
 
         raise ValueError(f"Could not determine union member from value {value!r}")
 
-    def _extract_normalized_value(self, value: object, member: str) -> object:
+    def _extract_value(self, value: object, member: str) -> object:
         """Extract active value payload from a DuckDB UNION dictionary."""
         if value is None:
-            raise ValueError("NULL normalized values are not supported")
+            raise ValueError("NULL values are not supported")
         if not isinstance(value, dict):
+            return value
+        if member in ("DT_COMPLEX", "DT_DCOMPLEX") and "re" in value and "im" in value:
             return value
         if member not in value:
             raise ValueError(f"Union member {member!r} missing from value {value!r}")
         return value[member]
 
+    def _get_row_layout(self, table_name: str) -> tuple[int, bool]:
+        """Return (row_count, index_aligned) for a table.
+
+        Index-aligned mode applies only when all index values are non-negative integers,
+        in which case row_count is max(index) + 1 to preserve gaps.
+        """
+        quoted_table = self.__quote_ident(table_name)
+        quoted_index = self.__quote_ident(self._INDEPENDENT_COLUMN)
+        row = self.con.execute(
+            f"SELECT MAX({quoted_index}), COUNT(DISTINCT {quoted_index}), "
+            f"SUM(CASE WHEN {quoted_index} < 0 OR {quoted_index} != FLOOR({quoted_index}) THEN 1 ELSE 0 END) "
+            f"FROM {quoted_table}"
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"Could not read row layout for table {table_name!r}")
+
+        max_index, distinct_count, non_integral_or_negative = row
+        if max_index is None:
+            return 0, False
+
+        if int(non_integral_or_negative) == 0 and self._is_non_negative_integral(max_index):
+            return int(float(max_index)) + 1, True
+        return int(distinct_count), False
+
     @staticmethod
-    def _is_normalized_mode(parameters: str) -> bool:
-        """Return True when identifier parameters request normalized mode."""
-        for token in parameters.replace(";", ",").split(","):
-            part = token.strip()
-            if not part:
-                continue
-            if "=" not in part:
-                continue
-            key, value = part.split("=", maxsplit=1)
-            if key.strip().lower() == "mode" and value.strip().lower() == "normalized":
-                return True
+    def _is_non_negative_integral(value: object) -> bool:
+        """Return True if value is an integer-like number >= 0."""
+        if isinstance(value, bool):
+            return False
+        if isinstance(value, int):
+            return value >= 0
+        if isinstance(value, float):
+            return value >= 0 and value.is_integer()
         return False
+
+    @staticmethod
+    def _invalid_placeholder_for_type(ods_type: ods.DataTypeEnum) -> object:
+        """Return placeholder value for missing samples in index-aligned retrieval."""
+        if ods_type == ods.DataTypeEnum.DT_BOOLEAN:
+            return False
+        if ods_type in (ods.DataTypeEnum.DT_BYTE, ods.DataTypeEnum.DT_SHORT, ods.DataTypeEnum.DT_LONG):
+            return 0
+        if ods_type == ods.DataTypeEnum.DT_LONGLONG:
+            return 0
+        if ods_type in (ods.DataTypeEnum.DT_FLOAT, ods.DataTypeEnum.DT_DOUBLE):
+            return 0.0
+        if ods_type in (ods.DataTypeEnum.DT_COMPLEX, ods.DataTypeEnum.DT_DCOMPLEX):
+            return {"re": 0.0, "im": 0.0}
+        if ods_type in (ods.DataTypeEnum.DT_STRING, ods.DataTypeEnum.DT_DATE):
+            return ""
+        if ods_type == ods.DataTypeEnum.DT_BYTESTR:
+            return b""
+        return 0
 
     def _list_tables(self) -> list[str]:
         """Return table names sorted alphabetically."""

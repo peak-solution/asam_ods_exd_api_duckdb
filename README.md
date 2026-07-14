@@ -18,19 +18,13 @@ It is built on the [ods-exd-api-box](https://pypi.org/project/ods-exd-api-box/) 
 
 ### Normalized Mode
 
-By default, the plugin reads classic column-wise tables (one channel per column).
+The plugin reads DuckDB tables in normalized form by default. Identifier parameters no longer switch between modes.
 
-An additional normalized mode can be enabled via identifier parameters:
-
-```
-mode=normalized
-```
-
-In normalized mode, all tables are interpreted with this schema:
+All tables are interpreted with this schema:
 
 ```sql
 CREATE TABLE mea (
-  name VARCHAR,
+  channel_id BIGINT,
   index BIGINT,
   value UNION(
     DT_DOUBLE DOUBLE,
@@ -46,12 +40,10 @@ CREATE TABLE mea (
 
 Channel mapping rules in normalized mode:
 
-1. Channel `index` is exposed as channel id `0` and marked as independent.
-2. One channel is created per distinct `name` value.
-3. Values are read from `value` and converted by the active UNION member.
-4. Channel ids are deterministic: `index` first, then channel names sorted alphabetically.
-
-The `flag` column is currently parsed as part of the schema but not interpreted functionally.
+1. One channel is created per distinct `channel_id` value.
+2. Values are read from `value` and converted by the active UNION member.
+3. `index` is used for ordering and row counting (`COUNT(DISTINCT index)`).
+4. `flag` is currently parsed as part of the schema but not interpreted functionally.
 
 ### Tests
 * [test_exd_api.py](tests/test_exd_api.py)<br>

@@ -15,52 +15,110 @@ from external_data_file import ExternalDataFile
 
 
 def _make_all_datatypes_duckdb(path: str) -> None:
-    """Create a DuckDB file with 4 tables covering all supported ODS types."""
+    """Create a DuckDB file with 4 tables covering supported ODS types."""
     with duckdb.connect(path) as con:
-        con.execute(
-            'CREATE TABLE group_complex ('
+        schema = (
+            "channel_id BIGINT, "
             '"index" DOUBLE, '
-            'complex_data STRUCT(re FLOAT, im FLOAT), '
-            'dcomplex_data STRUCT(re DOUBLE, im DOUBLE)'
-            ')'
+            "value UNION("
+            "DT_DOUBLE DOUBLE, "
+            "DT_FLOAT FLOAT, "
+            "DT_SHORT SHORT, "
+            "DT_LONG INT, "
+            "DT_LONGLONG LONG, "
+            "DT_STRING VARCHAR, "
+            "DT_BOOLEAN BOOLEAN, "
+            "DT_BYTE UTINYINT, "
+            "DT_COMPLEX STRUCT(re FLOAT, im FLOAT), "
+            "DT_DCOMPLEX STRUCT(re DOUBLE, im DOUBLE), "
+            "DT_BYTESTR BLOB, "
+            "DT_DATE VARCHAR"
+            "), "
+            "flag SHORT"
+        )
+        con.execute(f"CREATE TABLE group_complex ({schema})")
+        con.execute(f"CREATE TABLE group_int ({schema})")
+        con.execute(f"CREATE TABLE group_real ({schema})")
+        con.execute(f"CREATE TABLE group_string ({schema})")
+
+        idx = [0.0, 1.0]
+        con.executemany(
+            "INSERT INTO group_complex VALUES (?, ?, union_value(DT_DOUBLE := ?), ?)",
+            [(0, i, i, 0) for i in idx],
         )
         con.executemany(
-            'INSERT INTO group_complex VALUES (?, ?, ?)',
+            "INSERT INTO group_complex VALUES (?, ?, union_value(DT_COMPLEX := ?), ?)",
             [
-                (0.0, {"re": 1.0, "im": 2.0}, {"re": 5.0, "im": 6.0}),
-                (1.0, {"re": 3.0, "im": 4.0}, {"re": 7.0, "im": 8.0}),
+                (1, 0.0, {"re": 1.0, "im": 2.0}, 0),
+                (1, 1.0, {"re": 3.0, "im": 4.0}, 0),
             ],
         )
-        con.execute(
-            'CREATE TABLE group_int ('
-            '"index" DOUBLE, '
-            'tinyint_data TINYINT, '
-            'utinyint_data UTINYINT, '
-            'smallint_data SMALLINT, '
-            'usmallint_data USMALLINT, '
-            'integer_data INTEGER, '
-            'uinteger_data UINTEGER, '
-            'bigint_data BIGINT, '
-            'ubigint_data UBIGINT'
-            ')'
+        con.executemany(
+            "INSERT INTO group_complex VALUES (?, ?, union_value(DT_DCOMPLEX := ?), ?)",
+            [
+                (2, 0.0, {"re": 5.0, "im": 6.0}, 0),
+                (2, 1.0, {"re": 7.0, "im": 8.0}, 0),
+            ],
+        )
+
+        con.executemany(
+            "INSERT INTO group_int VALUES (?, ?, union_value(DT_DOUBLE := ?), ?)",
+            [(0, i, i, 0) for i in idx],
         )
         con.executemany(
-            'INSERT INTO group_int VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [(0.0, -2, 2, -2, 2, -2, 2, -2, 2), (1.0, 4, 4, 4, 4, 4, 4, 4, 4)],
-        )
-        con.execute(
-            'CREATE TABLE group_real ('
-            '"index" DOUBLE, '
-            'float_data FLOAT, '
-            'double_data DOUBLE'
-            ')'
+            "INSERT INTO group_int VALUES (?, ?, union_value(DT_SHORT := ?), ?)",
+            [(1, 0.0, -2, 0), (1, 1.0, 4, 0)],
         )
         con.executemany(
-            'INSERT INTO group_real VALUES (?, ?, ?)',
-            [(0.0, 1.1, 2.1), (1.0, 1.2, 2.2)],
+            "INSERT INTO group_int VALUES (?, ?, union_value(DT_BYTE := ?), ?)",
+            [(2, 0.0, 2, 0), (2, 1.0, 4, 0)],
         )
-        con.execute('CREATE TABLE group_string ("index" DOUBLE, string_data VARCHAR)')
-        con.executemany('INSERT INTO group_string VALUES (?, ?)', [(0.0, "abc"), (1.0, "def")])
+        con.executemany(
+            "INSERT INTO group_int VALUES (?, ?, union_value(DT_SHORT := ?), ?)",
+            [(3, 0.0, -2, 0), (3, 1.0, 4, 0)],
+        )
+        con.executemany(
+            "INSERT INTO group_int VALUES (?, ?, union_value(DT_LONG := ?), ?)",
+            [(4, 0.0, 2, 0), (4, 1.0, 4, 0)],
+        )
+        con.executemany(
+            "INSERT INTO group_int VALUES (?, ?, union_value(DT_LONG := ?), ?)",
+            [(5, 0.0, -2, 0), (5, 1.0, 4, 0)],
+        )
+        con.executemany(
+            "INSERT INTO group_int VALUES (?, ?, union_value(DT_LONGLONG := ?), ?)",
+            [(6, 0.0, 2, 0), (6, 1.0, 4, 0)],
+        )
+        con.executemany(
+            "INSERT INTO group_int VALUES (?, ?, union_value(DT_LONGLONG := ?), ?)",
+            [(7, 0.0, -2, 0), (7, 1.0, 4, 0)],
+        )
+        con.executemany(
+            "INSERT INTO group_int VALUES (?, ?, union_value(DT_DOUBLE := ?), ?)",
+            [(8, 0.0, 2.0, 0), (8, 1.0, 4.0, 0)],
+        )
+
+        con.executemany(
+            "INSERT INTO group_real VALUES (?, ?, union_value(DT_DOUBLE := ?), ?)",
+            [(0, i, i, 0) for i in idx],
+        )
+        con.executemany(
+            "INSERT INTO group_real VALUES (?, ?, union_value(DT_FLOAT := ?), ?)",
+            [(1, 0.0, 1.1, 0), (1, 1.0, 1.2, 0)],
+        )
+        con.executemany(
+            "INSERT INTO group_real VALUES (?, ?, union_value(DT_DOUBLE := ?), ?)",
+            [(2, 0.0, 2.1, 0), (2, 1.0, 2.2, 0)],
+        )
+
+        con.executemany(
+            "INSERT INTO group_string VALUES (?, ?, union_value(DT_DOUBLE := ?), ?)",
+            [(0, i, i, 0) for i in idx],
+        )
+        con.executemany(
+            "INSERT INTO group_string VALUES (?, ?, union_value(DT_STRING := ?), ?)",
+            [(1, 0.0, "abc", 0), (1, 1.0, "def", 0)],
+        )
 
 
 class TestDataTypes(unittest.TestCase):
@@ -163,8 +221,35 @@ class TestDataTypes(unittest.TestCase):
             file_path = os.path.join(temporary_directory_name, "independent_test.duckdb")
 
             with duckdb.connect(file_path) as con:
-                con.execute('CREATE TABLE group0 ("index" DOUBLE, int32_data INTEGER)')
-                con.executemany('INSERT INTO group0 VALUES (?, ?)', [(0.0, 2), (1.0, 4)])
+                con.execute(
+                    "CREATE TABLE group0 ("
+                    "channel_id BIGINT, "
+                    '"index" DOUBLE, '
+                    "value UNION("
+                    "DT_DOUBLE DOUBLE, "
+                    "DT_FLOAT FLOAT, "
+                    "DT_SHORT SHORT, "
+                    "DT_LONG INT, "
+                    "DT_LONGLONG LONG, "
+                    "DT_STRING VARCHAR, "
+                    "DT_BOOLEAN BOOLEAN, "
+                    "DT_BYTE UTINYINT, "
+                    "DT_COMPLEX STRUCT(re FLOAT, im FLOAT), "
+                    "DT_DCOMPLEX STRUCT(re DOUBLE, im DOUBLE), "
+                    "DT_BYTESTR BLOB, "
+                    "DT_DATE VARCHAR"
+                    "), "
+                    "flag SHORT"
+                    ")"
+                )
+                con.executemany(
+                    "INSERT INTO group0 VALUES (?, ?, union_value(DT_DOUBLE := ?), ?)",
+                    [(0, 0.0, 0.0, 0), (0, 1.0, 1.0, 0)],
+                )
+                con.executemany(
+                    "INSERT INTO group0 VALUES (?, ?, union_value(DT_LONG := ?), ?)",
+                    [(1, 0.0, 2, 0), (1, 1.0, 4, 0)],
+                )
 
             service = ExternalDataReader()
             handle = service.Open(exd_api.Identifier(url=Path(file_path).resolve().as_uri(), parameters=""), None)
@@ -177,8 +262,8 @@ class TestDataTypes(unittest.TestCase):
                 self.assertEqual(structure.groups[0].number_of_rows, 2)
                 self.assertEqual(len(structure.groups[0].channels), 2)
 
-                self.assertEqual("index", structure.groups[0].channels[0].name)
-                self.assertEqual("int32_data", structure.groups[0].channels[1].name)
+                self.assertEqual("0", structure.groups[0].channels[0].name)
+                self.assertEqual("1", structure.groups[0].channels[1].name)
 
                 self.assertEqual(structure.groups[0].channels[0].data_type, ods.DataTypeEnum.DT_DOUBLE)
                 self.assertEqual(structure.groups[0].channels[1].data_type, ods.DataTypeEnum.DT_LONG)
@@ -198,4 +283,3 @@ class TestDataTypes(unittest.TestCase):
                 self.assertSequenceEqual(values.channels[1].values.long_array.values, [2, 4])
             finally:
                 service.Close(handle, None)
-

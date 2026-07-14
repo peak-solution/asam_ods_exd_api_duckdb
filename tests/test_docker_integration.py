@@ -2,9 +2,11 @@ import logging
 import pathlib
 import socket
 import subprocess
+import tempfile
 import time
 import unittest
 
+import duckdb
 import grpc
 from google.protobuf.json_format import MessageToJson
 from ods_exd_api_box import exd_api, exd_grpc, ods
@@ -13,14 +15,17 @@ from ods_exd_api_box import exd_api, exd_grpc, ods
 class TestDockerContainer(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        cls._tmp_dir_obj = tempfile.TemporaryDirectory()
+        cls._tmp_dir = pathlib.Path(cls._tmp_dir_obj.name)
+        cls._make_simple_file(str(cls._tmp_dir / "simple.duckdb"))
+
         # Docker-Image bauen
         subprocess.run(["docker", "build", "-t", "asam-ods-exd-api-duckdb", "."], check=True)
 
         # Remove any stale container with the same name
         subprocess.run(["docker", "rm", "-f", "test_container"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        example_file_path = pathlib.Path.joinpath(pathlib.Path(__file__).parent.resolve(), "..", "data")
-        data_folder = pathlib.Path(example_file_path).absolute().resolve()
+        data_folder = cls._tmp_dir.absolute().resolve()
         cp = subprocess.run(
             [
                 "docker",
@@ -45,6 +50,49 @@ class TestDockerContainer(unittest.TestCase):
     def tearDownClass(cls):
         # Container stoppen
         subprocess.run(["docker", "stop", "test_container"], check=True)
+        cls._tmp_dir_obj.cleanup()
+
+    @staticmethod
+    def _make_simple_file(path: str) -> None:
+        with duckdb.connect(path) as con:
+            con.execute(
+                "CREATE TABLE measurements ("
+                "channel_id BIGINT, "
+                '"index" DOUBLE, '
+                "value UNION("
+                "DT_DOUBLE DOUBLE, "
+                "DT_FLOAT FLOAT, "
+                "DT_SHORT SHORT, "
+                "DT_LONG INT, "
+                "DT_LONGLONG LONG, "
+                "DT_STRING VARCHAR, "
+                "DT_BOOLEAN BOOLEAN, "
+                "DT_BYTE UTINYINT, "
+                "DT_COMPLEX STRUCT(re FLOAT, im FLOAT), "
+                "DT_DCOMPLEX STRUCT(re DOUBLE, im DOUBLE), "
+                "DT_BYTESTR BLOB, "
+                "DT_DATE VARCHAR"
+                "), "
+                "flag SHORT"
+                ")"
+            )
+            idx = [0.0, 1.0, 2.0, 3.0]
+            con.executemany(
+                "INSERT INTO measurements VALUES (?, ?, union_value(DT_DOUBLE := ?), ?)",
+                [(0, i, i, 0) for i in idx],
+            )
+            con.executemany(
+                "INSERT INTO measurements VALUES (?, ?, union_value(DT_DOUBLE := ?), ?)",
+                [(1, i, v, 0) for i, v in zip(idx, [10.0, 20.0, 30.0, 40.0])],
+            )
+            con.executemany(
+                "INSERT INTO measurements VALUES (?, ?, union_value(DT_LONGLONG := ?), ?)",
+                [(2, i, v, 0) for i, v in zip(idx, [1000, 2000, 3000, 4000])],
+            )
+            con.executemany(
+                "INSERT INTO measurements VALUES (?, ?, union_value(DT_STRING := ?), ?)",
+                [(3, i, v, 0) for i, v in zip(idx, ["a", "b", "c", "d"])],
+            )
 
     @classmethod
     def __wait_for_port_ready(cls, host="localhost", port=50051, timeout=30):
@@ -76,8 +124,8 @@ class TestDockerContainer(unittest.TestCase):
 
                 self.assertEqual(structure.name, "simple.duckdb")
                 self.assertEqual(len(structure.groups), 1)
-                self.assertEqual(structure.groups[0].number_of_rows, 563)
-                self.assertEqual(len(structure.groups[0].channels), 10)
+                self.assertEqual(structure.groups[0].number_of_rows, 4)
+                self.assertEqual(len(structure.groups[0].channels), 4)
                 self.assertEqual(structure.groups[0].id, 0)
                 logging.info(MessageToJson(structure))
                 self.assertEqual(structure.groups[0].channels[0].id, 0)
@@ -102,13 +150,10 @@ class TestDockerContainer(unittest.TestCase):
                 logging.info(MessageToJson(values))
 
                 self.assertEqual(values.channels[0].values.data_type, ods.DataTypeEnum.DT_DOUBLE)
-                self.assertSequenceEqual(
-                    values.channels[0].values.double_array.values, [0.0, 17905500.0, 30515300.0, 48317800.0]
-                )
-                self.assertEqual(values.channels[1].values.data_type, ods.DataTypeEnum.DT_LONGLONG)
-                self.assertSequenceEqual(
-                    values.channels[1].values.longlong_array.values,
-                    [1686082945335777300, 1686082945353682800, 1686082945366292600, 1686082945384095100],
-                )
+                self.assertSequenceEqual(values.channels[0].values.double_array.values, [0.0, 1.0, 2.0, 3.0])
+                self.assertEqual(values.channels[1].values.data_type, ods.DataTypeEnum.DT_DOUBLE)
+                self.assertSequenceEqual(values.channels[1].values.double_array.values, [10.0, 20.0, 30.0, 40.0])
+                self.assertEqual(values.channels[2].values.data_type, ods.DataTypeEnum.DT_LONGLONG)
+                self.assertSequenceEqual(values.channels[2].values.longlong_array.values, [1000, 2000, 3000, 4000])
             finally:
                 service.Close(handle, None)

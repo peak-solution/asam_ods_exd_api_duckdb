@@ -1,9 +1,11 @@
 import logging
 import os
 import pathlib
+import tempfile
 import unittest
 from glob import glob
 
+import duckdb
 from ods_exd_api_box import ExternalDataReader, FileHandlerRegistry, exd_api, ods
 
 from external_data_file import ExternalDataFile
@@ -19,6 +21,43 @@ class TestExampleFiles(unittest.TestCase):
         """Register ExternalDataFile handler before each test."""
         FileHandlerRegistry.register(file_type_name="test", factory=ExternalDataFile)
         self.mock_context = MockServicerContext()
+
+    def _make_file(self, path: str, *, rows: int = 5) -> None:
+        with duckdb.connect(path) as con:
+            con.execute(
+                "CREATE TABLE measurements ("
+                "channel_id BIGINT, "
+                '"index" DOUBLE, '
+                "value UNION("
+                "DT_DOUBLE DOUBLE, "
+                "DT_FLOAT FLOAT, "
+                "DT_SHORT SHORT, "
+                "DT_LONG INT, "
+                "DT_LONGLONG LONG, "
+                "DT_STRING VARCHAR, "
+                "DT_BOOLEAN BOOLEAN, "
+                "DT_BYTE UTINYINT, "
+                "DT_COMPLEX STRUCT(re FLOAT, im FLOAT), "
+                "DT_DCOMPLEX STRUCT(re DOUBLE, im DOUBLE), "
+                "DT_BYTESTR BLOB, "
+                "DT_DATE VARCHAR"
+                "), "
+                "flag SHORT"
+                ")"
+            )
+            idx = [float(i) for i in range(rows)]
+            con.executemany(
+                "INSERT INTO measurements VALUES (?, ?, union_value(DT_DOUBLE := ?), ?)",
+                [(0, i, i, 0) for i in idx],
+            )
+            con.executemany(
+                "INSERT INTO measurements VALUES (?, ?, union_value(DT_DOUBLE := ?), ?)",
+                [(1, i, i * 10.0, 0) for i in idx],
+            )
+            con.executemany(
+                "INSERT INTO measurements VALUES (?, ?, union_value(DT_STRING := ?), ?)",
+                [(2, i, f"s{int(i)}", 0) for i in idx],
+            )
 
     def __load_structure(self, example_file_uri: str):
         service = ExternalDataReader()
@@ -44,24 +83,30 @@ class TestExampleFiles(unittest.TestCase):
         return independent_attr.long_array.values[0] == 1
 
     def test_files(self):
-        """Parameterized test over all example files using unittest subTest."""
-        example_files_folder = pathlib.Path.joinpath(pathlib.Path(__file__).parent.resolve(), "..", "data", "examples")
-        example_files = [y for x in os.walk(example_files_folder) for y in glob(os.path.join(x[0], "*.duckdb"))]
-        self.assertGreater(len(example_files), 0, "No .duckdb example files found")
+        """Parameterized test over generated normalized example files using unittest subTest."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            examples_dir = pathlib.Path(temp_dir)
+            files = [examples_dir / "ex1.duckdb", examples_dir / "ex2.duckdb"]
+            self._make_file(str(files[0]), rows=3)
+            self._make_file(str(files[1]), rows=7)
 
-        for example_file in example_files:
-            example_file_path = pathlib.Path(example_file)
-            example_file_uri = example_file_path.absolute().resolve().as_uri()
-            relative_example_file = example_file_path.relative_to(example_files_folder)
-            with self.subTest(example_file=str(relative_example_file)):
-                self.__check_file_including_bulk(example_file_uri)
+            example_files = [y for x in os.walk(examples_dir) for y in glob(os.path.join(x[0], "*.duckdb"))]
+            self.assertGreater(len(example_files), 0, "No .duckdb example files found")
+
+            for example_file in example_files:
+                example_file_path = pathlib.Path(example_file)
+                example_file_uri = example_file_path.absolute().resolve().as_uri()
+                relative_example_file = example_file_path.relative_to(examples_dir)
+                with self.subTest(example_file=str(relative_example_file)):
+                    self.__check_file_including_bulk(example_file_uri)
 
     def test_file(self):
         """Check a single file"""
-        example_file = pathlib.Path.joinpath(pathlib.Path(__file__).parent.resolve(), "..", "data", "simple.duckdb")
-        assert example_file.exists()
-        example_file_uri = pathlib.Path(example_file).absolute().resolve().as_uri()
-        self.__check_file_including_bulk(example_file_uri)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            example_file = pathlib.Path(temp_dir) / "simple.duckdb"
+            self._make_file(str(example_file), rows=5)
+            example_file_uri = pathlib.Path(example_file).absolute().resolve().as_uri()
+            self.__check_file_including_bulk(example_file_uri)
 
     def __check_file_including_bulk(self, example_file_uri: str):
         print(f"URI: {example_file_uri}")

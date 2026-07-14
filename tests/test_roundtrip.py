@@ -37,6 +37,7 @@ from external_data_file import ExternalDataFile
 
 def _uri(path: str) -> str:
     from pathlib import Path
+
     return Path(path).resolve().as_uri()
 
 
@@ -62,19 +63,73 @@ class TestRoundtrip(unittest.TestCase):
         channels: dict of col_name -> (sql_type, list_of_values)
         """
         path = os.path.join(self.tmp_dir, name)
+
+        def _member_from_sql_type(sql_type: str) -> str:
+            t = sql_type.upper()
+            if t in ("FLOAT", "REAL"):
+                return "DT_FLOAT"
+            if t == "BOOLEAN":
+                return "DT_BOOLEAN"
+            if t == "UTINYINT":
+                return "DT_BYTE"
+            if t in ("TINYINT", "SMALLINT"):
+                return "DT_SHORT"
+            if t in ("USMALLINT", "INTEGER"):
+                return "DT_LONG"
+            if t in ("UINTEGER", "BIGINT"):
+                return "DT_LONGLONG"
+            if t.startswith("STRUCT("):
+                if "RE FLOAT" in t or "RE REAL" in t:
+                    return "DT_COMPLEX"
+                return "DT_DCOMPLEX"
+            if t in ("VARCHAR", "TEXT", "STRING"):
+                return "DT_STRING"
+            if t == "BLOB":
+                return "DT_BYTESTR"
+            if t.startswith("TIMESTAMP") or t in ("DATE", "TIME"):
+                return "DT_DATE"
+            return "DT_DOUBLE"
+
         with duckdb.connect(path) as con:
-            col_defs = ", ".join(
-                f'"{col}" {sql_type}' for col, (sql_type, _) in channels.items()
+            con.execute(
+                f'CREATE TABLE "{table}" ('
+                "channel_id BIGINT, "
+                '"index" DOUBLE, '
+                "value UNION("
+                "DT_DOUBLE DOUBLE, "
+                "DT_FLOAT FLOAT, "
+                "DT_SHORT SHORT, "
+                "DT_LONG INT, "
+                "DT_LONGLONG LONG, "
+                "DT_STRING VARCHAR, "
+                "DT_BOOLEAN BOOLEAN, "
+                "DT_BYTE UTINYINT, "
+                "DT_COMPLEX STRUCT(re FLOAT, im FLOAT), "
+                "DT_DCOMPLEX STRUCT(re DOUBLE, im DOUBLE), "
+                "DT_BYTESTR BLOB, "
+                "DT_DATE VARCHAR"
+                "), "
+                "flag SHORT"
+                ")"
             )
-            con.execute(f'CREATE TABLE "{table}" ({col_defs})')
-            col_list = ", ".join(f'"{col}"' for col in channels)
-            placeholders = ", ".join("?" for _ in channels)
-            rows = list(zip(*[vals for _, vals in channels.values()]))
-            if rows:
+
+            index_values = list(channels.get("index", ("DOUBLE", []))[1])
+            if index_values:
                 con.executemany(
-                    f'INSERT INTO "{table}" ({col_list}) VALUES ({placeholders})',
-                    rows,
+                    f'INSERT INTO "{table}" VALUES (?, ?, union_value(DT_DOUBLE := ?), ?)',
+                    [(0, idx, float(idx), 0) for idx in index_values],
                 )
+
+            channel_id = 1
+            for col_name, (sql_type, values) in channels.items():
+                if col_name == "index":
+                    continue
+                member = _member_from_sql_type(sql_type)
+                con.executemany(
+                    f'INSERT INTO "{table}" VALUES (?, ?, union_value({member} := ?), ?)',
+                    [(channel_id, index_values[i], values[i], 0) for i in range(len(index_values))],
+                )
+                channel_id += 1
         return path
 
     def _open(self, path: str):
@@ -108,10 +163,13 @@ class TestRoundtrip(unittest.TestCase):
 
     def test_float64_roundtrip(self):
         vals = [1.1, 2.2, -3.3]
-        path = self._make_file("f64.duckdb", {
-            "index": ("DOUBLE", [0.0, 1.0, 2.0]),
-            "ch_f64": ("DOUBLE", vals),
-        })
+        path = self._make_file(
+            "f64.duckdb",
+            {
+                "index": ("DOUBLE", [0.0, 1.0, 2.0]),
+                "ch_f64": ("DOUBLE", vals),
+            },
+        )
         handle = self._open(path)
         try:
             ch = self._structure(handle).groups[0].channels[1]
@@ -124,10 +182,13 @@ class TestRoundtrip(unittest.TestCase):
 
     def test_float32_roundtrip(self):
         vals = [1.5, -2.25, 0.0]
-        path = self._make_file("f32.duckdb", {
-            "index": ("DOUBLE", [0.0, 1.0, 2.0]),
-            "ch_f32": ("FLOAT", vals),
-        })
+        path = self._make_file(
+            "f32.duckdb",
+            {
+                "index": ("DOUBLE", [0.0, 1.0, 2.0]),
+                "ch_f32": ("FLOAT", vals),
+            },
+        )
         handle = self._open(path)
         try:
             ch = self._structure(handle).groups[0].channels[1]
@@ -331,10 +392,48 @@ class TestRoundtrip(unittest.TestCase):
         """Multiple tables are addressed by group_id (sorted alphabetically)."""
         path = os.path.join(self.tmp_dir, "multigrp.duckdb")
         with duckdb.connect(path) as con:
-            con.execute('CREATE TABLE grp0 ("index" DOUBLE, g0_ch DOUBLE)')
-            con.executemany("INSERT INTO grp0 VALUES (?, ?)", [(0.0, 1.0), (1.0, 2.0), (2.0, 3.0)])
-            con.execute('CREATE TABLE grp1 ("index" DOUBLE, g1_ch INTEGER)')
-            con.executemany("INSERT INTO grp1 VALUES (?, ?)", [(0.0, 10), (1.0, 20), (2.0, 30)])
+            for table_name in ("grp0", "grp1"):
+                con.execute(
+                    f'CREATE TABLE "{table_name}" ('
+                    "channel_id BIGINT, "
+                    '"index" DOUBLE, '
+                    "value UNION("
+                    "DT_DOUBLE DOUBLE, "
+                    "DT_FLOAT FLOAT, "
+                    "DT_SHORT SHORT, "
+                    "DT_LONG INT, "
+                    "DT_LONGLONG LONG, "
+                    "DT_STRING VARCHAR, "
+                    "DT_BOOLEAN BOOLEAN, "
+                    "DT_BYTE UTINYINT, "
+                    "DT_COMPLEX STRUCT(re FLOAT, im FLOAT), "
+                    "DT_DCOMPLEX STRUCT(re DOUBLE, im DOUBLE), "
+                    "DT_BYTESTR BLOB, "
+                    "DT_DATE VARCHAR"
+                    "), "
+                    "flag SHORT"
+                    ")"
+                )
+
+            grp0_idx = [0.0, 1.0, 2.0]
+            con.executemany(
+                "INSERT INTO grp0 VALUES (?, ?, union_value(DT_DOUBLE := ?), ?)",
+                [(0, i, i, 0) for i in grp0_idx],
+            )
+            con.executemany(
+                "INSERT INTO grp0 VALUES (?, ?, union_value(DT_DOUBLE := ?), ?)",
+                [(1, i, v, 0) for i, v in zip(grp0_idx, [1.0, 2.0, 3.0])],
+            )
+
+            grp1_idx = [0.0, 1.0, 2.0]
+            con.executemany(
+                "INSERT INTO grp1 VALUES (?, ?, union_value(DT_DOUBLE := ?), ?)",
+                [(0, i, i, 0) for i in grp1_idx],
+            )
+            con.executemany(
+                "INSERT INTO grp1 VALUES (?, ?, union_value(DT_LONG := ?), ?)",
+                [(1, i, v, 0) for i, v in zip(grp1_idx, [10, 20, 30])],
+            )
         handle = self._open(path)
         try:
             structure = self._structure(handle)
@@ -440,6 +539,53 @@ class TestRoundtrip(unittest.TestCase):
         finally:
             self.service.Close(handle, None)
 
+    def test_non_continuous_index_fills_invalid_values(self):
+        """Missing integer index positions are padded with invalid placeholders and flag=0."""
+        path = os.path.join(self.tmp_dir, "gaps.duckdb")
+        with duckdb.connect(path) as con:
+            con.execute(
+                "CREATE TABLE measurements ("
+                "channel_id BIGINT, "
+                '"index" DOUBLE, '
+                "value UNION("
+                "DT_DOUBLE DOUBLE, "
+                "DT_FLOAT FLOAT, "
+                "DT_SHORT SHORT, "
+                "DT_LONG INT, "
+                "DT_LONGLONG LONG, "
+                "DT_STRING VARCHAR, "
+                "DT_BOOLEAN BOOLEAN, "
+                "DT_BYTE UTINYINT, "
+                "DT_COMPLEX STRUCT(re FLOAT, im FLOAT), "
+                "DT_DCOMPLEX STRUCT(re DOUBLE, im DOUBLE), "
+                "DT_BYTESTR BLOB, "
+                "DT_DATE VARCHAR"
+                "), "
+                "flag SHORT"
+                ")"
+            )
+            con.executemany(
+                "INSERT INTO measurements VALUES (?, ?, union_value(DT_DOUBLE := ?), ?)",
+                [(0, 0.0, 0.0, 1), (0, 2.0, 2.0, 1), (0, 4.0, 4.0, 1)],
+            )
+            con.executemany(
+                "INSERT INTO measurements VALUES (?, ?, union_value(DT_DOUBLE := ?), ?)",
+                [(1, 0.0, 10.0, 1), (1, 2.0, 30.0, 1), (1, 4.0, 50.0, 1)],
+            )
+
+        handle = self._open(path)
+        try:
+            structure = self._structure(handle)
+            self.assertEqual(structure.groups[0].number_of_rows, 5)
+
+            result = self._values(handle, 0, [0, 1], start=0, limit=10)
+            self._assert_floats(result.channels[0].values.double_array.values, [0.0, 0.0, 2.0, 0.0, 4.0])
+            self._assert_floats(result.channels[1].values.double_array.values, [10.0, 0.0, 30.0, 0.0, 50.0])
+            self.assertSequenceEqual(list(result.channels[0].flags.values), [1, 0, 1, 0, 1])
+            self.assertSequenceEqual(list(result.channels[1].flags.values), [1, 0, 1, 0, 1])
+        finally:
+            self.service.Close(handle, None)
+
     # ==================================================================
     # Edge cases
     # ==================================================================
@@ -458,7 +604,27 @@ class TestRoundtrip(unittest.TestCase):
         """A table with zero rows must be reported with number_of_rows == 0."""
         path = os.path.join(self.tmp_dir, "empty.duckdb")
         with duckdb.connect(path) as con:
-            con.execute('CREATE TABLE measurements ("index" DOUBLE, empty_ch DOUBLE)')
+            con.execute(
+                "CREATE TABLE measurements ("
+                "channel_id BIGINT, "
+                '"index" DOUBLE, '
+                "value UNION("
+                "DT_DOUBLE DOUBLE, "
+                "DT_FLOAT FLOAT, "
+                "DT_SHORT SHORT, "
+                "DT_LONG INT, "
+                "DT_LONGLONG LONG, "
+                "DT_STRING VARCHAR, "
+                "DT_BOOLEAN BOOLEAN, "
+                "DT_BYTE UTINYINT, "
+                "DT_COMPLEX STRUCT(re FLOAT, im FLOAT), "
+                "DT_DCOMPLEX STRUCT(re DOUBLE, im DOUBLE), "
+                "DT_BYTESTR BLOB, "
+                "DT_DATE VARCHAR"
+                "), "
+                "flag SHORT"
+                ")"
+            )
         handle = self._open(path)
         try:
             structure = self._structure(handle)
@@ -498,9 +664,7 @@ class TestRoundtrip(unittest.TestCase):
     def test_index_channel_values(self):
         """Reading channel 0 (index) returns the stored index values."""
         ts = [0.0, 0.5, 1.0]
-        path = self._make_file(
-            "time_vals.duckdb", {"index": ("DOUBLE", ts), "ch": ("DOUBLE", [10.0, 20.0, 30.0])}
-        )
+        path = self._make_file("time_vals.duckdb", {"index": ("DOUBLE", ts), "ch": ("DOUBLE", [10.0, 20.0, 30.0])})
         handle = self._open(path)
         try:
             result = self._values(handle, 0, [0])
@@ -513,8 +677,29 @@ class TestRoundtrip(unittest.TestCase):
         """Group name must equal the DuckDB table name."""
         path = os.path.join(self.tmp_dir, "grp_meta.duckdb")
         with duckdb.connect(path) as con:
-            con.execute('CREATE TABLE my_group ("index" DOUBLE, ch DOUBLE)')
-            con.executemany("INSERT INTO my_group VALUES (?, ?)", [(0.0, 1.0)])
+            con.execute(
+                "CREATE TABLE my_group ("
+                "channel_id BIGINT, "
+                '"index" DOUBLE, '
+                "value UNION("
+                "DT_DOUBLE DOUBLE, "
+                "DT_FLOAT FLOAT, "
+                "DT_SHORT SHORT, "
+                "DT_LONG INT, "
+                "DT_LONGLONG LONG, "
+                "DT_STRING VARCHAR, "
+                "DT_BOOLEAN BOOLEAN, "
+                "DT_BYTE UTINYINT, "
+                "DT_COMPLEX STRUCT(re FLOAT, im FLOAT), "
+                "DT_DCOMPLEX STRUCT(re DOUBLE, im DOUBLE), "
+                "DT_BYTESTR BLOB, "
+                "DT_DATE VARCHAR"
+                "), "
+                "flag SHORT"
+                ")"
+            )
+            con.execute("INSERT INTO my_group VALUES (0, 0.0, union_value(DT_DOUBLE := 0.0), 0)")
+            con.execute("INSERT INTO my_group VALUES (1, 0.0, union_value(DT_DOUBLE := 1.0), 0)")
         handle = self._open(path)
         try:
             grp = self._structure(handle).groups[0]
@@ -561,8 +746,35 @@ class TestRoundtrip(unittest.TestCase):
         path = os.path.join(self.tmp_dir, "grp_id.duckdb")
         with duckdb.connect(path) as con:
             for i in range(3):
-                con.execute(f'CREATE TABLE table{i} ("index" DOUBLE, ch DOUBLE)')
-                con.executemany(f"INSERT INTO table{i} VALUES (?, ?)", [(0.0, float(i)), (1.0, float(i))])
+                con.execute(
+                    f"CREATE TABLE table{i} ("
+                    "channel_id BIGINT, "
+                    '"index" DOUBLE, '
+                    "value UNION("
+                    "DT_DOUBLE DOUBLE, "
+                    "DT_FLOAT FLOAT, "
+                    "DT_SHORT SHORT, "
+                    "DT_LONG INT, "
+                    "DT_LONGLONG LONG, "
+                    "DT_STRING VARCHAR, "
+                    "DT_BOOLEAN BOOLEAN, "
+                    "DT_BYTE UTINYINT, "
+                    "DT_COMPLEX STRUCT(re FLOAT, im FLOAT), "
+                    "DT_DCOMPLEX STRUCT(re DOUBLE, im DOUBLE), "
+                    "DT_BYTESTR BLOB, "
+                    "DT_DATE VARCHAR"
+                    "), "
+                    "flag SHORT"
+                    ")"
+                )
+                con.executemany(
+                    f"INSERT INTO table{i} VALUES (?, ?, union_value(DT_DOUBLE := ?), ?)",
+                    [(0, 0.0, 0.0, 0), (0, 1.0, 1.0, 0)],
+                )
+                con.executemany(
+                    f"INSERT INTO table{i} VALUES (?, ?, union_value(DT_DOUBLE := ?), ?)",
+                    [(1, 0.0, float(i), 0), (1, 1.0, float(i), 0)],
+                )
         handle = self._open(path)
         try:
             for gid in range(3):
@@ -594,9 +806,7 @@ class TestRoundtrip(unittest.TestCase):
             self.service.Close(handle, None)
 
     def test_start_beyond_row_count_raises(self):
-        path = self._make_file(
-            "err_start.duckdb", {"index": ("DOUBLE", [0.0, 1.0]), "ch": ("DOUBLE", [1.0, 2.0])}
-        )
+        path = self._make_file("err_start.duckdb", {"index": ("DOUBLE", [0.0, 1.0]), "ch": ("DOUBLE", [1.0, 2.0])})
         handle = self._open(path)
         try:
             with self.assertRaises(ValueError):
