@@ -144,30 +144,27 @@ class ExternalDataFile(ExdFileInterface):
             flags: list[int] = []
             if index_aligned:
                 stop = min(nr_of_rows, request.start + request.limit)
-                rows = self.con.execute(
-                    f"SELECT {quoted_index}, {self.__quote_ident('value')}, "
-                    f"{self.__quote_ident('flag')} FROM {quoted_table} "
-                    f"WHERE {self.__quote_ident(self._CHANNEL_COLUMN)} = ? "
-                    f"AND {quoted_index} >= ? AND {quoted_index} < ? "
-                    f"ORDER BY {quoted_index}",
-                    [channel_meta.channel_id, request.start, stop],
-                ).fetchall()
-                rows_by_index: dict[int, tuple[object, int]] = {}
-                for index_value, value_obj, flag_value in rows:
-                    if not self._is_non_negative_integral(index_value):
-                        continue
-                    idx = int(float(index_value))
-                    rows_by_index[idx] = (value_obj, int(flag_value) if flag_value is not None else 0)
-
                 section: list[object] = []
-                for idx in range(request.start, stop):
-                    row = rows_by_index.get(idx)
-                    if row is None:
+                if stop > request.start:
+                    rows = self.con.execute(
+                        f"SELECT s.sample_index, t.{self.__quote_ident('value')}, t.{self.__quote_ident('flag')} "
+                        f"FROM generate_series(?, ?) AS s(sample_index) "
+                        f"LEFT JOIN {quoted_table} AS t "
+                        f"ON t.{self.__quote_ident(self._CHANNEL_COLUMN)} = ? "
+                        f"AND CAST(t.{quoted_index} AS BIGINT) = s.sample_index "
+                        f"ORDER BY s.sample_index",
+                        [request.start, stop - 1, channel_meta.channel_id],
+                    ).fetchall()
+                else:
+                    rows = []
+
+                for _, value_obj, flag_value in rows:
+                    if value_obj is None:
                         section.append(self._invalid_placeholder_for_type(ods_type))
                         flags.append(0)
                     else:
-                        section.append(self._extract_value(row[0], channel_meta.union_member))
-                        flags.append(row[1])
+                        section.append(self._extract_value(value_obj, channel_meta.union_member))
+                        flags.append(int(flag_value) if flag_value is not None else 0)
             else:
                 rows = self.con.execute(
                     f"SELECT {self.__quote_ident('value')}, {self.__quote_ident('flag')} FROM {quoted_table} "
