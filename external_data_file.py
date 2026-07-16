@@ -73,7 +73,8 @@ class ExternalDataFile(ExdFileInterface):
         self.parameters = parameters
         self._table_meta: dict[str, ExternalDataFile._TableMeta] = {}
         self._union_members: dict[str, dict[int, set[str]]] = {}
-        self.con = duckdb.connect(file_path, read_only=True)
+        # Must match appender connection mode so both services can access one file.
+        self.con = duckdb.connect(file_path, read_only=False)
         self._log.debug("ExternalDataFile initialized")
 
     @override
@@ -93,13 +94,13 @@ class ExternalDataFile(ExdFileInterface):
         tables = self._list_tables()
         for group_index, table_name in enumerate(tables):
             table_meta = self._get_table_meta(table_name)
-            row_count, _ = self._get_row_layout(table_name)
+            row_count = self._get_max_index(table_name)
 
             new_group = exd_api.StructureResult.Group()
             new_group.name = table_name
             new_group.id = self._group_id_from_table_name(table_name, fallback=group_index)
             new_group.total_number_of_channels = len(table_meta.channels)
-            new_group.number_of_rows = row_count
+            new_group.number_of_rows = row_count + 1  # index is 0-based
 
             for channel_index, channel_meta in enumerate(table_meta.channels):
                 new_channel = exd_api.StructureResult.Channel()
@@ -129,7 +130,7 @@ class ExternalDataFile(ExdFileInterface):
         quoted_table = self.__quote_ident(table_name)
         quoted_index = self.__quote_ident(self._INDEPENDENT_COLUMN)
 
-        nr_of_rows, index_aligned = self._get_row_layout(table_name)
+        nr_of_rows = self._get_max_index(table_name)
         if request.start > nr_of_rows:
             raise ValueError(f"Channel start index {request.start} out of range!")
 
@@ -142,43 +143,35 @@ class ExternalDataFile(ExdFileInterface):
 
             ods_type = channel_meta.ods_type
             flags: list[int] = []
-            if index_aligned:
-                stop = min(nr_of_rows, request.start + request.limit)
-                section: list[object] = []
-                if stop > request.start:
-                    rows = self.con.execute(
-                        f"SELECT s.sample_index, t.{self.__quote_ident('value')}, t.{self.__quote_ident('flag')} "
-                        f"FROM generate_series(?, ?) AS s(sample_index) "
-                        f"LEFT JOIN {quoted_table} AS t "
-                        f"ON t.{self.__quote_ident(self._CHANNEL_COLUMN)} = ? "
-                        f"AND CAST(t.{quoted_index} AS BIGINT) = s.sample_index "
-                        f"ORDER BY s.sample_index",
-                        [request.start, stop - 1, channel_meta.channel_id],
-                    ).fetchall()
-                else:
-                    rows = []
-
-                for _, value_obj, flag_value in rows:
-                    if value_obj is None:
-                        section.append(self._invalid_placeholder_for_type(ods_type))
-                        flags.append(0)
-                    else:
-                        section.append(self._extract_value(value_obj, channel_meta.union_member))
-                        flags.append(int(flag_value) if flag_value is not None else 0)
-            else:
+            stop = min(nr_of_rows, request.start + request.limit)
+            section: list[object] = []
+            if stop > request.start:
                 rows = self.con.execute(
-                    f"SELECT {self.__quote_ident('value')}, {self.__quote_ident('flag')} FROM {quoted_table} "
-                    f"WHERE {self.__quote_ident(self._CHANNEL_COLUMN)} = ? "
-                    f"ORDER BY {quoted_index} LIMIT ? OFFSET ?",
-                    [channel_meta.channel_id, request.limit, request.start],
+                    f"SELECT s.sample_index, t.{self.__quote_ident('value')}, t.{self.__quote_ident('flag')} "
+                    f"FROM generate_series(?, ?) AS s(sample_index) "
+                    f"LEFT JOIN {quoted_table} AS t "
+                    f"ON t.{self.__quote_ident(self._CHANNEL_COLUMN)} = ? "
+                    f"AND CAST(t.{quoted_index} AS BIGINT) = s.sample_index "
+                    f"ORDER BY s.sample_index",
+                    [request.start, stop, channel_meta.channel_id],
                 ).fetchall()
-                section = [self._extract_value(row[0], channel_meta.union_member) for row in rows]
-                flags = [int(row[1]) if row[1] is not None else 0 for row in rows]
+            else:
+                rows = []
+
+            for _, value_obj, flag_value in rows:
+                if value_obj is None:
+                    section.append(self._invalid_placeholder_for_type(ods_type))
+                    flags.append(0)
+                else:
+                    section.append(self._extract_value(value_obj, channel_meta.union_member))
+                    flags.append(int(flag_value) if flag_value is not None else 0)
 
             new_channel_values = exd_api.ValuesResult.ChannelValues()
             new_channel_values.id = channel_id
             new_channel_values.values.data_type = ods_type
-            new_channel_values.flags.values[:] = flags
+            # Omit flags array when all values are 15 (ODS default semantics).
+            if flags and not all(flag == 15 for flag in flags):
+                new_channel_values.flags.values[:] = flags
 
             if ods_type == ods.DataTypeEnum.DT_BOOLEAN:
                 new_channel_values.values.boolean_array.values.extend(section)
@@ -353,40 +346,21 @@ class ExternalDataFile(ExdFileInterface):
             raise ValueError(f"Union member {member!r} missing from value {value!r}")
         return value[member]
 
-    def _get_row_layout(self, table_name: str) -> tuple[int, bool]:
-        """Return (row_count, index_aligned) for a table.
+    def _get_max_index(self, table_name: str) -> int:
+        """Return exclusive upper bound for index-based reads.
 
-        Index-aligned mode applies only when all index values are non-negative integers,
-        in which case row_count is max(index) + 1 to preserve gaps.
+        This returns ``max(index) + 1`` (or ``0`` for empty tables), which
+        matches the slicing logic used in ``get_values``.
         """
         quoted_table = self.__quote_ident(table_name)
         quoted_index = self.__quote_ident(self._INDEPENDENT_COLUMN)
         row = self.con.execute(
-            f"SELECT MAX({quoted_index}), COUNT(DISTINCT {quoted_index}), "
-            f"SUM(CASE WHEN {quoted_index} < 0 OR {quoted_index} != FLOOR({quoted_index}) THEN 1 ELSE 0 END) "
-            f"FROM {quoted_table}"
+            f"SELECT COALESCE(MAX(CAST({quoted_index} AS BIGINT)), -1) FROM {quoted_table}"
         ).fetchone()
         if row is None:
-            raise ValueError(f"Could not read row layout for table {table_name!r}")
-
-        max_index, distinct_count, non_integral_or_negative = row
-        if max_index is None:
-            return 0, False
-
-        if int(non_integral_or_negative) == 0 and self._is_non_negative_integral(max_index):
-            return int(float(max_index)) + 1, True
-        return int(distinct_count), False
-
-    @staticmethod
-    def _is_non_negative_integral(value: object) -> bool:
-        """Return True if value is an integer-like number >= 0."""
-        if isinstance(value, bool):
-            return False
-        if isinstance(value, int):
-            return value >= 0
-        if isinstance(value, float):
-            return value >= 0 and value.is_integer()
-        return False
+            raise ValueError(f"Could not read max index for table {table_name!r}")
+        max_index = cast(int, row[0])
+        return int(max_index)
 
     @staticmethod
     def _invalid_placeholder_for_type(ods_type: ods.DataTypeEnum) -> object:
