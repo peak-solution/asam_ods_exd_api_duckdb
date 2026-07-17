@@ -7,10 +7,9 @@ import duckdb
 import grpc
 from ods_exd_api_box import ExternalDataReader, FileHandlerRegistry, exd_api, exd_grpc
 
-import mdm_pb2
-import values_append_pb2 as va
-import values_append_pb2_grpc
 from external_data_file import ExternalDataFile
+from protobuf_generated import mdm_pb2, values_append_pb2_grpc
+from protobuf_generated import values_append_pb2 as va
 from values_append_service import ValuesAppenderService
 
 
@@ -61,7 +60,7 @@ class TestDualServiceIntegration(unittest.TestCase):
                 append_request = va.AppendRequest(values=mdm_pb2.WriteRequestList(values=[write_request]))
                 append_request.handle.uuid = handle.uuid
                 result = self._append_stub.Append(append_request)
-                self.assertEqual(result.rowCount, 2)
+                self.assertEqual(dict(result.row_count_by_group), {"1": 3})
 
                 after = self._reader_stub.GetValues(
                     exd_api.ValuesRequest(handle=handle, group_id=1, channel_ids=[7], start=0, limit=3)

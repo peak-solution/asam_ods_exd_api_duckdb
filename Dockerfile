@@ -15,16 +15,9 @@ COPY pyproject.toml .
 RUN pip3 install --upgrade pip && pip3 install .
 # should be copied at the end to avoid unnecessary rebuilds
 COPY external_data_file.py ./
-COPY dual_service_server.py ./
+COPY exd_duckdb_server.py ./
 COPY values_append_service.py ./
-COPY mdm_pb2.py ./
-COPY mdm_pb2_grpc.py ./
-COPY ods_pb2.py ./
-COPY ods_pb2_grpc.py ./
-COPY ods_external_data_pb2.py ./
-COPY ods_external_data_pb2_grpc.py ./
-COPY values_append_pb2.py ./
-COPY values_append_pb2_grpc.py ./
+COPY protobuf_generated/ ./protobuf_generated/
 USER appuser
 # Start dual server (ExternalDataReader + ValuesAppender)
 CMD [ "python3", "exd_duckdb_server.py"]

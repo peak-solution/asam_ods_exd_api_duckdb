@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+import time
 from datetime import timezone
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -14,8 +15,8 @@ import duckdb
 import grpc
 from ods_exd_api_box import ExternalDataReader, exd_api
 
-import values_append_pb2 as va
-import values_append_pb2_grpc
+from protobuf_generated import values_append_pb2 as va
+from protobuf_generated import values_append_pb2_grpc
 
 
 class ValuesAppenderService(values_append_pb2_grpc.ValuesAppenderServicer):
@@ -93,19 +94,101 @@ class ValuesAppenderService(values_append_pb2_grpc.ValuesAppenderServicer):
                 "No open DuckDB file found for handle. Call ExternalDataReader.Open first.",
             )
 
-        current_rowcount = 0
+        profile_enabled = os.getenv("APPEND_PROFILE") == "1"
+        profile_totals: dict[str, float] = {
+            "extract_payload": 0.0,
+            "extract_flags": 0.0,
+            "next_index_query": 0.0,
+            "insert_payload": 0.0,
+        }
+
+        appended_rows = 0
+        touched_groups_to_tables: dict[str, str] = {}
+        next_index_by_group: dict[str, int] = {}
         with duckdb.connect(duckdb_path, read_only=False) as con:
+            batched_rows: dict[tuple[str, str], list[tuple[int, float, Any, int]]] = {}
             for idx, write_request in enumerate(request.values.values):
-                current_rowcount = self._append_one_request(con, idx, write_request, context)
+                group_id = str(write_request.channel_group_id)
+                table_name = self._resolve_table_name(group_id)
+                touched_groups_to_tables[group_id] = table_name
+
+                if group_id not in next_index_by_group:
+                    started_at = time.perf_counter()
+                    next_index_by_group[group_id] = self._next_index_for_channel(con, table_name)
+                    if profile_enabled:
+                        profile_totals["next_index_query"] += time.perf_counter() - started_at
+
+                start_index = next_index_by_group[group_id]
+                member, rows = self._append_one_request(
+                    con,
+                    idx,
+                    write_request,
+                    context,
+                    start_index,
+                    profile_totals if profile_enabled else None,
+                )
+                appended_count = len(rows)
+                batch_key = (table_name, member)
+                batched_rows.setdefault(batch_key, []).extend(rows)
+                appended_rows += appended_count
+                next_index_by_group[group_id] += appended_count
+
+            for (table_name, member), rows in batched_rows.items():
+                started_at = time.perf_counter()
+                self._insert_payload_rows(con, table_name, member, rows)
+                if profile_enabled:
+                    profile_totals["insert_payload"] += time.perf_counter() - started_at
+
+            row_count_by_group = {
+                group_id: self._number_of_rows_for_table(con, table_name)
+                for group_id, table_name in sorted(touched_groups_to_tables.items())
+            }
 
         self._log.info(
-            "Appended %d write request(s) / %d row(s) in DuckDB file %s for handle %s",
+            (
+                "Appended %d write request(s) / %d row(s); returning number_of_rows per "
+                "table=%s in DuckDB file %s and handle %s"
+            ),
             len(request.values.values),
-            current_rowcount,
+            appended_rows,
+            row_count_by_group,
             duckdb_path,
             request.handle.uuid,
         )
-        return va.AppendResult(rowCount=current_rowcount)
+        result = va.AppendResult()
+        result.row_count_by_group.update(row_count_by_group)
+
+        if profile_enabled:
+            total_profiled = sum(profile_totals.values())
+            if total_profiled > 0:
+                profile_line = (
+                    "Append profile: "
+                    f"extract_payload={profile_totals['extract_payload']:.3f}s "
+                    f"({100.0 * profile_totals['extract_payload'] / total_profiled:.1f}%), "
+                    f"extract_flags={profile_totals['extract_flags']:.3f}s "
+                    f"({100.0 * profile_totals['extract_flags'] / total_profiled:.1f}%), "
+                    f"next_index_query={profile_totals['next_index_query']:.3f}s "
+                    f"({100.0 * profile_totals['next_index_query'] / total_profiled:.1f}%), "
+                    f"insert_payload={profile_totals['insert_payload']:.3f}s "
+                    f"({100.0 * profile_totals['insert_payload'] / total_profiled:.1f}%)"
+                )
+                self._log.info(
+                    (
+                        "Append profile: extract_payload=%.3fs (%.1f%%), extract_flags=%.3fs (%.1f%%), "
+                        "next_index_query=%.3fs (%.1f%%), insert_payload=%.3fs (%.1f%%)"
+                    ),
+                    profile_totals["extract_payload"],
+                    100.0 * profile_totals["extract_payload"] / total_profiled,
+                    profile_totals["extract_flags"],
+                    100.0 * profile_totals["extract_flags"] / total_profiled,
+                    profile_totals["next_index_query"],
+                    100.0 * profile_totals["next_index_query"] / total_profiled,
+                    profile_totals["insert_payload"],
+                    100.0 * profile_totals["insert_payload"] / total_profiled,
+                )
+                print(profile_line)
+
+        return result
 
     def _resolve_duckdb_path_from_handle(
         self,
@@ -138,7 +221,9 @@ class ValuesAppenderService(values_append_pb2_grpc.ValuesAppenderServicer):
         idx: int,
         write_request: Any,
         context: grpc.ServicerContext,
-    ) -> int:
+        start_index: int,
+        profile_totals: dict[str, float] | None = None,
+    ) -> tuple[str, list[tuple[int, float, Any, int]]]:
         if not write_request.channel_group_id:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"values[{idx}].channel_group_id is required")
         if not write_request.channel_id:
@@ -154,15 +239,23 @@ class ValuesAppenderService(values_append_pb2_grpc.ValuesAppenderServicer):
         except ValueError as exc:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"values[{idx}].channel_id must be an integer: {exc}")
 
+        started_at = time.perf_counter()
         member, payload_values = self._extract_explicit_payload(write_request, idx, context)
+        if profile_totals is not None:
+            profile_totals["extract_payload"] += time.perf_counter() - started_at
         if not payload_values:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"values[{idx}] explicit payload must not be empty")
 
+        started_at = time.perf_counter()
         flags = self._extract_flags(write_request, len(payload_values), idx, context)
-        start_index = self._next_index_for_channel(con, table_name, channel_id)
+        if profile_totals is not None:
+            profile_totals["extract_flags"] += time.perf_counter() - started_at
 
-        self._insert_payload_rows(con, table_name, channel_id, start_index, member, payload_values, flags)
-        return start_index + len(payload_values)
+        rows = [
+            (channel_id, float(start_index + offset), payload_values[offset], int(flags[offset]))
+            for offset in range(len(payload_values))
+        ]
+        return member, rows
 
     def _resolve_table_name(self, channel_group_id: str) -> str:
         if channel_group_id.isdigit():
@@ -250,32 +343,29 @@ class ValuesAppenderService(values_append_pb2_grpc.ValuesAppenderServicer):
             return [0] * payload_len
         return flags
 
-    def _next_index_for_channel(self, con: duckdb.DuckDBPyConnection, table_name: str, channel_id: int) -> int:
+    def _next_index_for_channel(self, con: duckdb.DuckDBPyConnection, table_name: str) -> int:
         quoted_table = self._quote_ident(table_name)
-        row = con.execute(
-            f'SELECT COALESCE(MAX("index"), -1) FROM {quoted_table} WHERE channel_id = ?',
-            [channel_id],
-        ).fetchone()
+        row = con.execute(f'SELECT COALESCE(MAX("index"), -1) FROM {quoted_table}').fetchone()
         if row is None:
             return 0
         return int(float(row[0])) + 1
+
+    def _number_of_rows_for_table(self, con: duckdb.DuckDBPyConnection, table_name: str) -> int:
+        quoted_table = self._quote_ident(table_name)
+        row = con.execute(f'SELECT COALESCE(MAX(CAST("index" AS BIGINT)), -1) FROM {quoted_table}').fetchone()
+        if row is None:
+            return 0
+        return int(row[0]) + 1
 
     def _insert_payload_rows(
         self,
         con: duckdb.DuckDBPyConnection,
         table_name: str,
-        channel_id: int,
-        start_index: int,
         member: str,
-        payload_values: list[Any],
-        flags: list[int],
+        rows: list[tuple[int, float, Any, int]],
     ) -> None:
         quoted_table = self._quote_ident(table_name)
         sql = f"INSERT INTO {quoted_table} VALUES (?, ?, union_value({member} := ?), ?)"
-        rows = [
-            (channel_id, float(start_index + offset), payload_values[offset], int(flags[offset]))
-            for offset in range(len(payload_values))
-        ]
         con.executemany(sql, rows)
 
     @staticmethod

@@ -15,7 +15,7 @@ from ods_exd_api_box.server import (
 )
 
 from external_data_file import ExternalDataFile
-from values_append_pb2_grpc import add_ValuesAppenderServicer_to_server
+from protobuf_generated.values_append_pb2_grpc import add_ValuesAppenderServicer_to_server
 from values_append_service import ValuesAppenderService
 
 

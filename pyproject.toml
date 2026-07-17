@@ -3,19 +3,15 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
+packages = ["protobuf_generated"]
 py-modules = [
     "external_data_file",
     "exd_duckdb_server",
     "values_append_service",
-    "mdm_pb2",
-    "mdm_pb2_grpc",
-    "ods_pb2",
-    "ods_pb2_grpc",
-    "ods_external_data_pb2",
-    "ods_external_data_pb2_grpc",
-    "values_append_pb2",
-    "values_append_pb2_grpc",
 ]
+
+[tool.setuptools.package-data]
+protobuf_generated = ["*.pyi"]
 
 [project]
 name = "asam-ods-exd-api-duckdb"
