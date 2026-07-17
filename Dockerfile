@@ -9,15 +9,14 @@ LABEL org.opencontainers.image.licenses=MIT
 WORKDIR /app
 # Create a non-root user and change ownership of /app
 RUN useradd -ms /bin/bash appuser && chown -R appuser /app
-# Copy source code first (needed for pip install)
-COPY pyproject.toml .
-# Install required packages
-RUN pip3 install --upgrade pip && pip3 install .
-# should be copied at the end to avoid unnecessary rebuilds
+# Copy package metadata and source code needed for pip install
+COPY pyproject.toml README.md LICENSE ./
 COPY external_data_file.py ./
 COPY exd_duckdb_server.py ./
 COPY values_append_service.py ./
 COPY protobuf_generated/ ./protobuf_generated/
+# Install required packages
+RUN pip3 install --upgrade pip && pip3 install .
 USER appuser
 # Start dual server (ExternalDataReader + ValuesAppender)
 CMD [ "python3", "exd_duckdb_server.py"]

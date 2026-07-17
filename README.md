@@ -45,6 +45,11 @@ Channel mapping rules in normalized mode:
 3. `index` is used for ordering and row counting (`COUNT(DISTINCT index)`).
 4. `flag` is currently parsed as part of the schema but not interpreted functionally.
 
+ValuesAppender `Append` response semantics:
+
+1. `row_count_by_group` map values represent the current `MAX(index)` per touched group.
+2. Channels appended within the same group in one request must have equal payload lengths.
+
 ### Tests
 * [test_exd_api.py](tests/test_exd_api.py)<br>
   Some basic tests on example files in `data` folder.
