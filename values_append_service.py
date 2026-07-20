@@ -126,13 +126,13 @@ class ValuesAppenderService(values_append_pb2_grpc.ValuesAppenderServicer):
                 table_name = self._resolve_table_name(group_id)
                 self._ensure_table_exists(con, table_name)
 
-                start_index = self._max_index_for_table(con, table_name) + 1
+                start_index = self.next_index_for_table(con, table_name)
                 group_dataframe = self._write_requests_to_dataframe(write_requests, context)
 
                 group_dataframe["index"] = group_dataframe["index"] + float(start_index)
                 self._insert_group_frame(con, table_name, group_dataframe)
 
-                max_index_by_group[group_id] = self._max_index_for_table(con, table_name)
+                max_index_by_group[group_id] = self.next_index_for_table(con, table_name)
                 appended_rows += len(group_dataframe)
 
         self._log.info(
@@ -326,12 +326,12 @@ class ValuesAppenderService(values_append_pb2_grpc.ValuesAppenderServicer):
             return [0] * payload_len
         return flags
 
-    def _max_index_for_table(self, con: duckdb.DuckDBPyConnection, table_name: str) -> int:
+    def next_index_for_table(self, con: duckdb.DuckDBPyConnection, table_name: str) -> int:
         quoted_table = self._quote_ident(table_name)
         row = con.execute(f'SELECT COALESCE(MAX(CAST("index" AS BIGINT)), -1) FROM {quoted_table}').fetchone()
         if row is None or row[0] is None:
             return -1
-        return int(row[0])
+        return int(row[0]) + 1
 
     def _insert_group_frame(
         self,

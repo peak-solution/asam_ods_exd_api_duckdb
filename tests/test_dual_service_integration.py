@@ -60,7 +60,7 @@ class TestDualServiceIntegration(unittest.TestCase):
                 append_request = va.AppendRequest(values=mdm_pb2.WriteRequestList(values=[write_request]))
                 append_request.handle.uuid = handle.uuid
                 result = self._append_stub.Append(append_request)
-                self.assertEqual(dict(result.row_count_by_group), {"1": 2})
+                self.assertEqual(dict(result.row_count_by_group), {"1": 3})
 
                 after = self._reader_stub.GetValues(
                     exd_api.ValuesRequest(handle=handle, group_id=1, channel_ids=[7], start=0, limit=3)

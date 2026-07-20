@@ -115,7 +115,7 @@ class TestValuesAppenderService(unittest.TestCase):
                 self.reader.Close(handle, None)
 
             self.assertIsNotNone(response)
-            self.assertEqual(dict(response.row_count_by_group), {"1": 2})
+            self.assertEqual(dict(response.row_count_by_group), {"1": 3})
             self.assertIsNone(context.code())
 
             with duckdb.connect(str(db_path), read_only=True) as con:
@@ -162,7 +162,7 @@ class TestValuesAppenderService(unittest.TestCase):
                     context,
                 )
                 self.assertIsNone(context.code())
-                self.assertEqual(dict(response.row_count_by_group), {"1": 2})
+                self.assertEqual(dict(response.row_count_by_group), {"1": 3})
 
                 after = self.reader.GetValues(
                     exd_api.ValuesRequest(handle=handle, group_id=1, channel_ids=[7], start=0, limit=3),
@@ -196,7 +196,7 @@ class TestValuesAppenderService(unittest.TestCase):
                 self.reader.Close(handle, None)
 
             self.assertIsNone(context.code())
-            self.assertEqual(dict(response.row_count_by_group), {"1": 0, "2": 1})
+            self.assertEqual(dict(response.row_count_by_group), {"1": 1, "2": 2})
 
     def test_append_rejects_mismatched_lengths_in_same_group(self):
         with TemporaryDirectory() as tmp_dir:
@@ -249,7 +249,7 @@ class TestValuesAppenderService(unittest.TestCase):
                 self.reader.Close(handle, None)
 
             self.assertIsNone(context.code())
-            self.assertEqual(dict(response.row_count_by_group), {"1": 1})
+            self.assertEqual(dict(response.row_count_by_group), {"1": 2})
 
             with duckdb.connect(str(db_path), read_only=True) as con:
                 rows = con.execute(
@@ -411,7 +411,7 @@ class TestValuesAppenderService(unittest.TestCase):
 
             elapsed_seconds = time.perf_counter() - started_at
             self.assertIsNotNone(last_response)
-            self.assertEqual(dict(last_response.row_count_by_group), {"1": rounds - 1})
+            self.assertEqual(dict(last_response.row_count_by_group), {"1": rounds})
 
             with duckdb.connect(str(db_path), read_only=True) as con:
                 total_rows = con.execute("SELECT COUNT(*) FROM sm1").fetchone()[0]
