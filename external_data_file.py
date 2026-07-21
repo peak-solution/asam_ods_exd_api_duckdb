@@ -136,29 +136,55 @@ class ExternalDataFile(ExdFileInterface):
 
         rv = exd_api.ValuesResult(id=request.group_id)
 
-        for channel_id in request.channel_ids:
+        requested_channel_ids = sorted(set(request.channel_ids))
+        channel_meta_by_id: dict[int, ExternalDataFile._ChannelMeta] = {}
+        for channel_id in requested_channel_ids:
             channel_meta = table_meta.channels_by_id.get(channel_id)
             if channel_meta is None:
                 raise ValueError(f"Invalid channel id {channel_id}!")
+            channel_meta_by_id[channel_id] = channel_meta
 
+        stop = min(nr_of_rows, request.start + request.limit)
+        values_by_channel: dict[int, list[object]] = {}
+        flags_by_channel: dict[int, list[object]] = {}
+        if stop > request.start and requested_channel_ids:
+            quoted_value = self.__quote_ident("value")
+            quoted_flag = self.__quote_ident("flag")
+            query_rows = self.con.execute(
+                f"WITH idx AS ("
+                f"SELECT range AS sample_index FROM range(?, ?)"
+                f"), channels AS ("
+                f"SELECT unnest(?) AS channel_id"
+                f") "
+                f"SELECT "
+                f"c.channel_id, "
+                f"array_agg(t.{quoted_value} ORDER BY idx.sample_index) AS values, "
+                f"array_agg(t.{quoted_flag} ORDER BY idx.sample_index) AS flags "
+                f"FROM channels c "
+                f"CROSS JOIN idx "
+                f"LEFT JOIN {quoted_table} AS t "
+                f"ON t.{self.__quote_ident(self._CHANNEL_COLUMN)} = c.channel_id "
+                f"AND CAST(t.{quoted_index} AS BIGINT) = idx.sample_index "
+                f"GROUP BY c.channel_id "
+                f"ORDER BY c.channel_id",
+                [request.start, stop, requested_channel_ids],
+            ).fetchall()
+
+            for channel_id_value, values_obj, flags_obj in query_rows:
+                channel_id = int(channel_id_value)
+                values_by_channel[channel_id] = list(values_obj) if values_obj is not None else []
+                flags_by_channel[channel_id] = list(flags_obj) if flags_obj is not None else []
+
+        for channel_id in requested_channel_ids:
+            channel_meta = channel_meta_by_id[channel_id]
             ods_type = channel_meta.ods_type
             flags: list[int] = []
-            stop = min(nr_of_rows, request.start + request.limit)
             section: list[object] = []
-            if stop > request.start:
-                rows = self.con.execute(
-                    f"SELECT s.sample_index, t.{self.__quote_ident('value')}, t.{self.__quote_ident('flag')} "
-                    f"FROM generate_series(?, ?) AS s(sample_index) "
-                    f"LEFT JOIN {quoted_table} AS t "
-                    f"ON t.{self.__quote_ident(self._CHANNEL_COLUMN)} = ? "
-                    f"AND CAST(t.{quoted_index} AS BIGINT) = s.sample_index "
-                    f"ORDER BY s.sample_index",
-                    [request.start, stop - 1, channel_meta.channel_id],
-                ).fetchall()
-            else:
-                rows = []
 
-            for _, value_obj, flag_value in rows:
+            channel_values = values_by_channel.get(channel_id, [])
+            channel_flags = flags_by_channel.get(channel_id, [])
+            for index, value_obj in enumerate(channel_values):
+                flag_value = channel_flags[index] if index < len(channel_flags) else None
                 if value_obj is None:
                     section.append(self._invalid_placeholder_for_type(ods_type))
                     flags.append(0)

@@ -128,6 +128,18 @@ class TestNormalizedMode(unittest.TestCase):
         finally:
             self.service.Close(handle, None)
 
+    def test_channel_results_are_sorted_by_channel_id(self):
+        path = self._make_file("sorted_order.duckdb")
+        handle = self._open(path)
+        try:
+            values = self._values(handle, 0, [3, 1, 2], start=0, limit=3)
+            self.assertSequenceEqual([ch.id for ch in values.channels], [1, 2, 3])
+            self.assertSequenceEqual(list(values.channels[0].values.long_array.values), [1000, 1100, 1200])
+            self.assertSequenceEqual(list(values.channels[1].values.double_array.values), [1.5, 2.5, 3.5])
+            self.assertSequenceEqual(list(values.channels[2].values.string_array.values), ["idle", "run", "run"])
+        finally:
+            self.service.Close(handle, None)
+
     def test_default_mode(self):
         path = self._make_file("default_mode.duckdb")
         handle = self._open(path)
