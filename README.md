@@ -5,165 +5,198 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/asam-ods-exd-api-duckdb.svg)](https://pypi.org/project/asam-ods-exd-api-duckdb/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-This repository contains a [ASAM ODS EXD-API](https://www.asam.net/standards/detail/ods/) plugin that uses [DuckDB](https://duckdb.org/) to read DuckDB database files.
+ASAM ODS External Data API plugin for DuckDB.
 
-It is built on the [ods-exd-api-box](https://pypi.org/project/ods-exd-api-box/) helper library which provides the gRPC server infrastructure and proto stubs.
+The project provides a gRPC server implementation based on
+[ods-exd-api-box](https://pypi.org/project/ods-exd-api-box/) with:
 
-## Content
+- ExternalDataReader service (EXD read interface)
+- ValuesAppender sidecar service (append/write interface)
 
-### Implementation
-* [external_data_file.py](external_data_file.py)<br>
-  Implements the `ExdFileInterface` from `ods-exd-api-box` to access DuckDB files using [duckdb](https://pypi.org/project/duckdb/).
-  Also contains the entry point to run the gRPC service.
+## Current State
 
-### Normalized Mode
+- Runtime data model is normalized-only.
+- Reader and appender share the same DuckDB file handle lifecycle.
+- Default executable starts the dual-service server.
+- End-to-end tests cover read, append, datatype handling, and Docker runtime.
 
-The plugin reads DuckDB tables in normalized form by default. Identifier parameters no longer switch between modes.
+## Data Model (Normalized Tables)
 
-All tables are interpreted with this schema:
+Each table in the DuckDB file must use this column schema:
 
 ```sql
-CREATE TABLE mea (
+CREATE TABLE sm1 (
   channel_id BIGINT,
-  index BIGINT,
+  "index" DOUBLE,
   value UNION(
     DT_DOUBLE DOUBLE,
     DT_FLOAT FLOAT,
     DT_SHORT SHORT,
     DT_LONG INT,
     DT_LONGLONG LONG,
-    DT_STRING VARCHAR
+    DT_STRING VARCHAR,
+    DT_BOOLEAN BOOLEAN,
+    DT_BYTE UTINYINT,
+    DT_COMPLEX STRUCT(re FLOAT, im FLOAT),
+    DT_DCOMPLEX STRUCT(re DOUBLE, im DOUBLE),
+    DT_BYTESTR BLOB,
+    DT_DATE VARCHAR
   ),
   flag SHORT
-)
+);
 ```
 
-Channel mapping rules in normalized mode:
+Reader behavior:
 
-1. One channel is created per distinct `channel_id` value.
-2. Values are read from `value` and converted by the active UNION member.
-3. `index` is used for ordering and row counting (`COUNT(DISTINCT index)`).
-4. `flag` is currently parsed as part of the schema but not interpreted functionally.
+1. Each DuckDB table is exposed as one ODS group.
+2. Each distinct channel_id in a table is exposed as one ODS channel.
+3. Group row count is computed as max(index) + 1.
+4. Values are index-aligned; missing samples are returned as datatype-specific placeholders.
+5. Channel results are returned sorted by channel_id.
 
-ValuesAppender `Append` response semantics:
+Group id resolution:
 
-1. `row_count_by_group` map values represent the current `MAX(index)` per touched group.
-2. Channels appended within the same group in one request must have equal payload lengths.
+1. Preferred table lookup is by name sm<group_id>.
+2. Legacy fallback is ordinal table position if sm<group_id> is absent.
 
-### Tests
-* [test_exd_api.py](tests/test_exd_api.py)<br>
-  Some basic tests on example files in `data` folder.
-* [example_access_exd_api_duckdb.ipynb](example_access_exd_api_duckdb.ipynb)<br>
-  jupyter notebook the shows communication done by ASAM ODS server or Importer using the EXD-API plugin.
+## ValuesAppender Service
 
-## Development
+The sidecar gRPC service supports:
 
-### Setup
+- Init: creates an in-memory DuckDB file for requested group ids and returns its bytes.
+- Append: appends explicit payloads to an opened DuckDB file.
 
-Install [uv](https://docs.astral.sh/uv/) and then install the project with dev dependencies:
+Append contract (validated by tests):
 
-```
+1. handle.uuid must reference a file opened via ExternalDataReader.Open.
+2. Only explicit payloads are currently supported.
+3. Within one channel_group_id, all channels in the same Append request must have equal payload lengths.
+4. Appended rows are index-aligned per group.
+5. Response field row_count_by_group contains the next index (max(index) + 1) for each touched group.
+
+Supported explicit datatypes:
+
+- DT_DOUBLE
+- DT_FLOAT
+- DT_SHORT
+- DT_LONG
+- DT_LONGLONG
+- DT_STRING
+- DT_BOOLEAN
+- DT_BYTE
+- DT_BYTESTR
+- DT_DATE (stored as ISO-8601 UTC string)
+- DT_COMPLEX
+- DT_DCOMPLEX
+
+## Repository Layout
+
+- external_data_file.py: EXD file handler implementation for DuckDB.
+- values_append_service.py: ValuesAppender gRPC implementation.
+- exd_duckdb_server.py: dual gRPC server entry point.
+- tests/: unit and integration test suite.
+- data/: example and generated test data files.
+- proto/ and protobuf_generated/: protobuf definitions and generated stubs.
+- example_access_exd_api_duckdb.ipynb: notebook with EXD API communication examples.
+
+## Requirements
+
+- Python 3.14+
+- [uv](https://docs.astral.sh/uv/) for local development
+- Docker (optional, for container workflows and Docker integration tests)
+
+## Development Setup
+
+```bash
 uv sync --group dev
 ```
 
-### Run Tests
+## Run Locally
 
-```
-uv run python -m unittest discover tests
-```
-
-### Run Plugin Locally
-
-Use an explicit IPv4 bind address on Windows to avoid IPv6 bind issues:
+Start the dual-service gRPC server:
 
 ```bash
 uv run asam-ods-exd-api-duckdb --bind-address 127.0.0.1 --port 50051
 ```
 
-Stop the server with `Ctrl+C`. A non-zero exit code after interruption is expected.
-
-### Run Plugin With uvx
-
-Run the latest published package without installing it into the current project environment:
+Run the latest published version without local install:
 
 ```bash
 uvx asam-ods-exd-api-duckdb --bind-address 127.0.0.1 --port 50051
 ```
 
-### Code Quality
+## Test
+
+Run all tests:
 
 ```bash
-uv sync --group dev                    # 1. Install all dependencies
-uv run ruff format .                   # 2. Format code
-uv run ruff check --fix .              # 3. Fix lint violations
-uv run mypy external_data_file.py      # 4. Type check
-uv run python -m unittest discover tests  # 5. Run tests
+uv run python -m unittest discover tests
+```
+
+Optional heavy append performance test:
+
+```bash
+RUN_PERFORMANCE_TESTS=1 PERF_APPEND_ROUNDS=100 PERF_APPEND_COLUMNS=10000 \
+uv run python -m unittest tests.test_values_append_service.TestValuesAppenderService.test_append_performance_100x_10000_single_value_requests
+```
+
+## Code Quality
+
+```bash
+uv run ruff format .
+uv run ruff check --fix .
+uv run mypy external_data_file.py values_append_service.py exd_duckdb_server.py
 ```
 
 ## Docker
 
-### Docker Image Details
+Published image:
 
-The Docker image for this project is available at:
-
-`ghcr.io/peak-solution/asam-ods-exd-api-duckdb:latest`
-
-This image is automatically built and pushed via a GitHub Actions workflow. To pull and run the image:
-
-```
-docker pull ghcr.io/peak-solution/asam-ods-exd-api-duckdb:latest
-docker run -v /path/to/local/data:/data -p 50051:50051 ghcr.io/peak-solution/asam-ods-exd-api-duckdb:latest
+```text
+ghcr.io/peak-solution/asam-ods-exd-api-duckdb:latest
 ```
 
-### Using the Docker Container
+Build locally:
 
-To build the Docker image locally:
-```
+```bash
 docker build -t asam-ods-exd-api-duckdb .
 ```
 
-To start the Docker container:
-```
-docker run -v /path/to/local/data:/data -p 50051:50051 asam-ods-exd-api-duckdb
+Run locally:
+
+```bash
+docker run --rm -it -p 50051:50051 asam-ods-exd-api-duckdb
 ```
 
-have a look at [start options](https://totonga.github.io/ods-exd-api-box/server-options.html) to
-figure out how to customize the behavior of the EXD-API plugin.
+Run published image:
 
-## Architecture and Usage in ODS Server
+```bash
+docker pull ghcr.io/peak-solution/asam-ods-exd-api-duckdb:latest
+docker run --rm -it -p 50051:50051 ghcr.io/peak-solution/asam-ods-exd-api-duckdb:latest
+```
+
+For additional server flags (TLS, health checks, worker settings), see
+[ods-exd-api-box server options](https://totonga.github.io/ods-exd-api-box/server-options.html).
+
+## High-Level Flow
 
 ```mermaid
 sequenceDiagram
+  autonumber
+  participant Client
+  participant Reader as ExternalDataReader
+  participant Appender as ValuesAppender
+  participant DuckDB
 
-actor CLIENT as Client
-participant PDTT as 🛠️Importer
-participant PODS as 🗃️ASAM ODS server
-participant PLUGIN as 📊EXD-API plugin
-participant FILE as 🗂️File Storage
+  Client->>Reader: Open(file)
+  Reader->>DuckDB: open connection
+  Client->>Reader: GetStructure / GetValues
+  Reader->>DuckDB: read normalized rows
+  DuckDB-->>Reader: typed values
+  Reader-->>Client: EXD responses
 
-autonumber
-
-opt Import phase
-  FILE ->>+ PDTT: New file shows up
-  PDTT ->>+ PLUGIN : Get Structure
-  PLUGIN -> FILE: Extract content information
-  PLUGIN ->> PLUGIN: Create Structure
-  PLUGIN ->>- PDTT: Return Structure
-  PDTT ->> PODS: Import ODS structure
-  Note right of PDTT: Create hierarchy<br/>AoTest,AoMeasurement,...
-  PDTT ->>- PODS: Add External Data info
-  Note right of PDTT: Attach AoFile ... for external data<br/>AoFile,AoSubmatrix,AoLocalColumn,...
-end
-
-Note over CLIENT, FILE: Now we can work with the imported files
-
-loop Runtime phase
-  CLIENT ->> PODS: Establish ODS session
-  CLIENT ->> PODS: Work with meta data imported from structure
-  CLIENT ->> PODS: Access external channel in preview
-  PODS ->> PLUGIN: GetValues
-  PLUGIN ->> FILE: Get Channel values
-  PLUGIN ->> PODS: Return values of channels
-  PODS ->> CLIENT: Return values needed for plot
-end
+  Client->>Appender: Append(handle, explicit payloads)
+  Appender->>DuckDB: append union_value rows
+  DuckDB-->>Appender: updated max index per group
+  Appender-->>Client: row_count_by_group
 ```
