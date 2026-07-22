@@ -15,7 +15,7 @@ protobuf_generated = ["*.pyi"]
 
 [project]
 name = "asam-ods-exd-api-duckdb"
-version = "0.1.0"
+version = "0.9.0"
 description = "ASAM ODS EXD API implementation to read external data from DuckDB files."
 readme = "README.md"
 requires-python = ">=3.14"
@@ -24,7 +24,7 @@ license-files = ["LICENSE"]
 authors = [{name = "peak-solution"}]
 keywords = ["ASAM", "ODS", "EXD-API", "DuckDB", "measurement data"]
 classifiers = [
-    "Development Status :: 5 - Production/Stable",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "Operating System :: OS Independent",
