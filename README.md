@@ -119,10 +119,11 @@ Start the dual-service gRPC server:
 uv run asam-ods-exd-api-duckdb --bind-address 127.0.0.1 --port 50051
 ```
 
-Run the latest published version without local install:
+Install and run the latest version without docker container:
 
 ```bash
-uvx asam-ods-exd-api-duckdb --bind-address 127.0.0.1 --port 50051
+uv tool install asam-ods-exd-api-duckdb --from https://github.com/peak-solution/asam_ods_exd_api_duckdb.git
+asam-ods-exd-api-duckdb
 ```
 
 ## Test
