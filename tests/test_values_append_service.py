@@ -423,6 +423,118 @@ class TestValuesAppenderService(unittest.TestCase):
                 f"{elapsed_seconds:.2f}s, {inserts_per_second:,.0f} inserts/s"
             )
 
+    def test_append_write_requests_cycling_all_datatypes(self):
+        """WriteRequests in one AppendRequest cycling through all supported dtypes.
+
+        n is extracted as a parameter via the private helper so the assertion
+        logic can be reused with different sizes without duplicating setup code.
+        """
+        self._run_append_cycling_datatypes(n=10_000)
+
+    def _run_append_cycling_datatypes(self, n: int) -> None:
+        _date_ts = Timestamp()
+        _date_ts.FromDatetime(datetime(2026, 1, 1, tzinfo=timezone.utc))
+        _date_iso = "2026-01-01T00:00:00Z"
+
+        def _pop_double(wr):
+            wr.explicit.double_array.values.append(1.5)
+
+        def _pop_float(wr):
+            wr.explicit.float_array.values.append(2.5)
+
+        def _pop_short(wr):
+            wr.explicit.short_array.values.append(7)
+
+        def _pop_long(wr):
+            wr.explicit.integer_array.values.append(42)
+
+        def _pop_longlong(wr):
+            wr.explicit.long_array.values.append(99)
+
+        def _pop_string(wr):
+            wr.explicit.string_array.values.append("hello")
+
+        def _pop_boolean(wr):
+            wr.explicit.boolean_array.values.append(True)
+
+        def _pop_byte(wr):
+            wr.explicit.byte_array.values = b"\x11"
+
+        def _pop_bytestr(wr):
+            wr.explicit.byte_stream_array.values.append(b"\xab\xcd")
+
+        def _pop_date(wr):
+            wr.explicit.date_array.values.add().CopyFrom(_date_ts)
+
+        def _pop_complex(wr):
+            v = wr.explicit.float_complex_array.values.add()
+            v.re, v.im = 1.0, -1.0
+
+        def _pop_dcomplex(wr):
+            v = wr.explicit.double_complex_array.values.add()
+            v.re, v.im = 2.0, -2.0
+
+        # (populate_fn, extract_sql, expected_python_value, use_almost_equal)
+        fixtures = [
+            (_pop_double, "CAST(union_extract(value, 'DT_DOUBLE') AS DOUBLE)", 1.5, True),
+            (_pop_float, "CAST(union_extract(value, 'DT_FLOAT') AS DOUBLE)", 2.5, True),
+            (_pop_short, "CAST(union_extract(value, 'DT_SHORT') AS BIGINT)", 7, False),
+            (_pop_long, "CAST(union_extract(value, 'DT_LONG') AS BIGINT)", 42, False),
+            (_pop_longlong, "CAST(union_extract(value, 'DT_LONGLONG') AS BIGINT)", 99, False),
+            (_pop_string, "union_extract(value, 'DT_STRING')", "hello", False),
+            (_pop_boolean, "union_extract(value, 'DT_BOOLEAN')", True, False),
+            (_pop_byte, "CAST(union_extract(value, 'DT_BYTE') AS BIGINT)", 17, False),
+            (_pop_bytestr, "union_extract(value, 'DT_BYTESTR')", b"\xab\xcd", False),
+            (_pop_date, "union_extract(value, 'DT_DATE')", _date_iso, False),
+            (_pop_complex, "union_extract(value, 'DT_COMPLEX')", {"re": 1.0, "im": -1.0}, False),
+            (_pop_dcomplex, "union_extract(value, 'DT_DCOMPLEX')", {"re": 2.0, "im": -2.0}, False),
+        ]
+        num_dtypes = len(fixtures)
+
+        with TemporaryDirectory() as tmp_dir:
+            db_path = Path(tmp_dir) / "cycling.duckdb"
+            self._create_normalized_table(str(db_path), "sm1")
+            handle = self.reader.Open(exd_api.Identifier(url=db_path.resolve().as_uri(), parameters=""), None)
+
+            write_requests = []
+            for i in range(n):
+                wr = mdm_pb2.WriteRequestList.WriteRequest(
+                    channel_group_id="1",
+                    channel_id=str(i + 1),
+                )
+                fixtures[i % num_dtypes][0](wr)
+                write_requests.append(wr)
+
+            append_request = va.AppendRequest(values=mdm_pb2.WriteRequestList(values=write_requests))
+            append_request.handle.uuid = handle.uuid
+            context = MockServicerContext()
+
+            try:
+                response = self.service.Append(append_request, context)
+            finally:
+                self.reader.Close(handle, None)
+
+            self.assertIsNone(context.code())
+            # Each write request carries exactly one value; all share group "1".
+            # After the insert, MAX(index)=0 so next_index returns 1.
+            self.assertEqual(dict(response.row_count_by_group), {"1": 1})
+
+            with duckdb.connect(str(db_path), read_only=True) as con:
+                total_rows = con.execute("SELECT COUNT(*) FROM sm1").fetchone()[0]
+                self.assertEqual(total_rows, n)
+
+                # Verify one sample per dtype; channel_id = dtype_index + 1 (first cycle)
+                for dtype_idx, (_, extract_sql, expected, approx) in enumerate(fixtures):
+                    if dtype_idx >= n:
+                        break
+                    channel_id = dtype_idx + 1
+                    row = con.execute(f"SELECT {extract_sql} FROM sm1 WHERE channel_id = {channel_id}").fetchone()
+                    self.assertIsNotNone(row, f"No row for channel_id={channel_id} (dtype_idx={dtype_idx})")
+                    if approx:
+                        self.assertAlmostEqual(row[0], expected, places=5)
+                    else:
+                        self.assertEqual(row[0], expected)
+
     @staticmethod
     def _create_normalized_table(db_path: str, table_name: str) -> None:
         schema = (

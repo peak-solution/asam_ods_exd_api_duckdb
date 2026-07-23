@@ -342,6 +342,23 @@ class ValuesAppenderService(values_append_pb2_grpc.ValuesAppenderServicer):
         if dataframe.empty:
             return
 
+        # Split by dtype so each registered DataFrame has a homogeneous value
+        # column.  DuckDB infers the column type from the first values it sees
+        # in a registered pandas relation; a mixed-type (object) column would
+        # cause DuckDB to pick a single concrete type and then fail when it
+        # encounters values of a different Python type during materialisation.
+        for dtype, sub_df in dataframe.groupby("dtype", sort=False):
+            self._insert_dtype_frame(con, table_name, sub_df)
+
+    def _insert_dtype_frame(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        table_name: str,
+        dataframe: pandas.DataFrame,
+    ) -> None:
+        if dataframe.empty:
+            return
+
         quoted_table = self._quote_ident(table_name)
         relation_name = "df"
         con.register(relation_name, dataframe)
