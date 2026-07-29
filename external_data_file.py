@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, time, timezone
 from typing import Any, Mapping, cast, override
 
 import duckdb
@@ -245,7 +245,7 @@ class ExternalDataFile(ExdFileInterface):
                     else:
                         raise ValueError(f"Expected bytes value, got {item!r}")
             elif ods_type == ods.DataTypeEnum.DT_DATE:
-                new_channel_values.values.string_array.values[:] = [str(v) for v in section]
+                new_channel_values.values.string_array.values[:] = [self._to_ods_date_string(v) for v in section]
             else:
                 raise NotImplementedError(f"Unsupported ODS type {ods_type!r}")
 
@@ -406,6 +406,49 @@ class ExternalDataFile(ExdFileInterface):
         if ods_type == ods.DataTypeEnum.DT_BYTESTR:
             return b""
         return 0
+
+    @staticmethod
+    def _to_ods_date_string(value: object) -> str:
+        """Convert DATE/TIME/TIMESTAMP-like values to ODS timestamp format."""
+        if isinstance(value, datetime):
+            return ExternalDataFile._datetime_to_ods_string(value)
+
+        if isinstance(value, date):
+            return ExternalDataFile._datetime_to_ods_string(datetime.combine(value, time.min))
+
+        if isinstance(value, str):
+            stripped = value.strip()
+            if len(stripped) == 23 and stripped.isdigit():
+                return stripped
+
+            parsed = ExternalDataFile._parse_datetime_string(stripped)
+            if parsed is not None:
+                return ExternalDataFile._datetime_to_ods_string(parsed)
+            return stripped
+
+        return str(value)
+
+    @staticmethod
+    def _parse_datetime_string(value: str) -> datetime | None:
+        """Parse common ISO-like datetime strings to a datetime object."""
+        normalized = value
+        if normalized.endswith("Z"):
+            normalized = normalized[:-1] + "+00:00"
+
+        try:
+            return datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _datetime_to_ods_string(value: datetime) -> str:
+        """Format datetime to ODS layout: YYYYMMDDHHmmSSNNNNNNNNN."""
+        dt = value
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+        nanoseconds = dt.microsecond * 1000
+        return dt.strftime("%Y%m%d%H%M%S") + f"{nanoseconds:09d}"
 
     def _list_tables(self) -> list[str]:
         """Return table names sorted alphabetically."""
