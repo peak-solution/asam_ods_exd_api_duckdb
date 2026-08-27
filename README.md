@@ -13,6 +13,9 @@ The project provides a gRPC server implementation based on
 - ExternalDataReader service (EXD read interface)
 - ValuesAppender sidecar service (append/write interface)
 
+Find more tools supporting your digital transformation in the [Peak Solution Git Repo](https://github.com/peak-solution). 
+
+
 ## Current State
 
 - Runtime data model is normalized-only.
