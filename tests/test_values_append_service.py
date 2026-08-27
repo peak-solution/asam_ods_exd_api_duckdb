@@ -172,6 +172,49 @@ class TestValuesAppenderService(unittest.TestCase):
             finally:
                 self.reader.Close(handle, None)
 
+    def test_get_values_sees_channel_appended_after_open(self):
+        with TemporaryDirectory() as tmp_dir:
+            db_path = Path(tmp_dir) / "shared.duckdb"
+            self._create_normalized_table(str(db_path), "sm1")
+
+            with duckdb.connect(str(db_path), read_only=False) as con:
+                con.execute(
+                    "INSERT INTO sm1 VALUES (?, ?, union_value(DT_DOUBLE := ?), ?)",
+                    [7, 0.0, 10.0, 0],
+                )
+
+            # Open the file and trigger a read so the channel metadata cache is built
+            # while it still only contains channel_id 7.
+            handle = self.reader.Open(exd_api.Identifier(url=db_path.resolve().as_uri(), parameters=""), None)
+            try:
+                self.reader.GetValues(
+                    exd_api.ValuesRequest(handle=handle, group_id=1, channel_ids=[7], start=0, limit=1),
+                    None,
+                )
+
+                context = MockServicerContext()
+                write_request = mdm_pb2.WriteRequestList.WriteRequest(
+                    channel_group_id="1",
+                    channel_id="9",
+                )
+                write_request.explicit.double_array.values.extend([1.0, 2.0])
+
+                append_request = va.AppendRequest(values=mdm_pb2.WriteRequestList(values=[write_request]))
+                append_request.handle.uuid = handle.uuid
+                response = self.service.Append(append_request, context)
+                self.assertIsNone(context.code())
+                self.assertEqual(dict(response.row_count_by_group), {"1": 3})
+
+                # Channel 9 shares the group's index space with channel 7, so its rows
+                # land at index 1 and 2 (index 0 is already taken by channel 7).
+                after = self.reader.GetValues(
+                    exd_api.ValuesRequest(handle=handle, group_id=1, channel_ids=[9], start=0, limit=3),
+                    None,
+                )
+                self.assertSequenceEqual(after.channels[0].values.double_array.values, [0.0, 1.0, 2.0])
+            finally:
+                self.reader.Close(handle, None)
+
     def test_append_returns_number_of_rows_for_each_touched_table(self):
         with TemporaryDirectory() as tmp_dir:
             db_path = Path(tmp_dir) / "shared.duckdb"

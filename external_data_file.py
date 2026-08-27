@@ -137,6 +137,11 @@ class ExternalDataFile(ExdFileInterface):
         rv = exd_api.ValuesResult(id=request.group_id)
 
         requested_channel_ids = sorted(set(request.channel_ids))
+        # Channels appended after this instance's cache was built are missed here;
+        # refresh once so newly written channel ids become visible without a restart.
+        if any(channel_id not in table_meta.channels_by_id for channel_id in requested_channel_ids):
+            table_meta = self._get_table_meta(table_name, force_refresh=True)
+
         channel_meta_by_id: dict[int, ExternalDataFile._ChannelMeta] = {}
         for channel_id in requested_channel_ids:
             channel_meta = table_meta.channels_by_id.get(channel_id)
@@ -253,9 +258,12 @@ class ExternalDataFile(ExdFileInterface):
 
         return rv
 
-    def _get_table_meta(self, table_name: str) -> _TableMeta:
+    def _get_table_meta(self, table_name: str, force_refresh: bool = False) -> _TableMeta:
         """Build and cache channel mapping for one table."""
-        if table_name in self._table_meta:
+        if force_refresh:
+            self._table_meta.pop(table_name, None)
+            self._union_members.pop(table_name, None)
+        elif table_name in self._table_meta:
             return self._table_meta[table_name]
 
         columns = self._list_columns(table_name)
