@@ -2,7 +2,7 @@
 # docker build -t ghcr.io/peak-solution/asam-ods-exd-api-duckdb:latest .
 # docker run --rm -it -v "$(pwd)/data":"$(pwd)/data" -p 50051:50051 ghcr.io/peak-solution/asam-ods-exd-api-duckdb:latest
 
-FROM python:3.14-slim
+FROM python:3.15-slim
 LABEL org.opencontainers.image.source=https://github.com/totonga/asam-ods-exd-api-duckdb
 LABEL org.opencontainers.image.description="ASAM ODS External Data API for DuckDB files (*.duckdb)"
 LABEL org.opencontainers.image.licenses=MIT
